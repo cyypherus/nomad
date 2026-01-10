@@ -1,7 +1,6 @@
 use reticulum::destination::link::LinkEvent;
 use reticulum::destination::{DestinationDesc, DestinationName, SingleOutputDestination};
 use reticulum::hash::AddressHash;
-use reticulum::identity::HashIdentity;
 use reticulum::packet::PacketContext;
 use reticulum::transport::Transport;
 use sha2::{Digest, Sha256};
@@ -21,6 +20,15 @@ pub enum PageRequestResult {
 
 struct PendingRequest {
     url: String,
+}
+
+pub fn node_aspect_name() -> DestinationName {
+    DestinationName::new("nomadnetwork", "node")
+}
+
+pub fn is_node_announce(dest: &SingleOutputDestination) -> bool {
+    let expected = node_aspect_name();
+    dest.desc.name.as_name_hash_slice() == expected.as_name_hash_slice()
 }
 
 pub struct NodeClient {
@@ -43,27 +51,22 @@ impl NodeClient {
         }
     }
 
-    pub async fn register_node(&self, lxmf_dest: &SingleOutputDestination) {
-        let identity = lxmf_dest.desc.identity;
-        let node_name = DestinationName::new("nomadnetwork", "node");
-        let node_hash = compute_address_hash(&identity, &node_name);
+    pub async fn register_node(&self, node_dest: &SingleOutputDestination) {
+        let mut node_hash_bytes = [0u8; 16];
+        node_hash_bytes.copy_from_slice(node_dest.desc.address_hash.as_slice());
 
-        let mut hash_bytes = [0u8; 16];
-        hash_bytes.copy_from_slice(node_hash.as_slice());
+        log::debug!("Registered node: {}", hex::encode(node_hash_bytes),);
 
-        let node_desc = DestinationDesc {
-            identity,
-            address_hash: node_hash,
-            name: node_name,
-        };
-
-        self.known_nodes.lock().await.insert(hash_bytes, node_desc);
+        self.known_nodes
+            .lock()
+            .await
+            .insert(node_hash_bytes, node_dest.desc);
     }
 
-    pub async fn request_page(&self, lxmf_hash: [u8; 16], path: String) -> Result<(), String> {
+    pub async fn request_page(&self, node_hash: [u8; 16], path: String) -> Result<(), String> {
         let node_desc = {
             let nodes = self.known_nodes.lock().await;
-            nodes.get(&lxmf_hash).cloned()
+            nodes.get(&node_hash).cloned()
         };
 
         let node_desc = match node_desc {
@@ -71,19 +74,20 @@ impl NodeClient {
             None => return Err("Unknown node - no announce received".to_string()),
         };
 
-        let url = format!("{}:{}", hex::encode(lxmf_hash), path);
+        let url = format!("{}:{}", hex::encode(node_hash), path);
 
         let transport = self.transport.lock().await;
+        let mut link_events = transport.out_link_events();
         let link = transport.link(node_desc).await;
         let link_id = *link.lock().await.id();
+        drop(transport);
+
+        log::debug!("NodeClient: link {} created, subscribed to events", link_id);
 
         self.pending
             .lock()
             .await
             .insert(link_id, PendingRequest { url: url.clone() });
-
-        let mut link_events = transport.out_link_events();
-        drop(transport);
 
         let pending = self.pending.clone();
         let transport = self.transport.clone();
@@ -105,8 +109,10 @@ impl NodeClient {
                     result = link_events.recv() => {
                         match result {
                             Ok(event_data) if event_data.id == link_id => {
+                                log::debug!("NodeClient: received event for link {}", link_id);
                                 match event_data.event {
                                     LinkEvent::Activated => {
+                                        log::info!("NodeClient: link {} activated, sending page request", link_id);
                                         if let Err(e) = send_page_request(&transport, &link, &path).await {
                                             let mut pending = pending.lock().await;
                                             if let Some(req) = pending.remove(&link_id) {
@@ -163,18 +169,6 @@ impl NodeClient {
     }
 }
 
-fn compute_address_hash(
-    identity: &reticulum::identity::Identity,
-    name: &DestinationName,
-) -> AddressHash {
-    let hash = Sha256::new()
-        .chain_update(name.as_name_hash_slice())
-        .chain_update(identity.as_address_hash_slice())
-        .finalize();
-
-    AddressHash::new_from_slice(&hash[..16])
-}
-
 async fn send_page_request(
     transport: &Arc<Mutex<Transport>>,
     link: &Arc<Mutex<reticulum::destination::link::Link>>,
@@ -187,7 +181,11 @@ async fn send_page_request(
 
     let path_hash = compute_path_hash(path);
 
-    let request_data: (f64, Vec<u8>, Option<()>) = (timestamp, path_hash.to_vec(), None);
+    let request_data: (f64, serde_bytes::ByteBuf, Option<()>) = (
+        timestamp,
+        serde_bytes::ByteBuf::from(path_hash.to_vec()),
+        None,
+    );
     let packed = rmp_serde::to_vec(&request_data).map_err(|e| e.to_string())?;
 
     let link_guard = link.lock().await;
@@ -214,4 +212,31 @@ fn parse_page_response(data: &[u8]) -> Result<String, String> {
 
     let content_bytes = response.2.ok_or("No content in response")?;
     String::from_utf8(content_bytes).map_err(|e| format!("Invalid UTF-8: {}", e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    
+    #[test]
+    fn test_page_request_format() {
+        let path = "/page/index.mu";
+        let path_hash = compute_path_hash(path);
+        
+        let timestamp: f64 = 1736541605.123;
+        let request_data: (f64, serde_bytes::ByteBuf, Option<()>) = (
+            timestamp,
+            serde_bytes::ByteBuf::from(path_hash.to_vec()),
+            None,
+        );
+        let packed = rmp_serde::to_vec(&request_data).unwrap();
+        
+        println!("Path: {}", path);
+        println!("Path hash: {}", hex::encode(path_hash));
+        println!("Packed length: {}", packed.len());
+        println!("Packed hex: {}", hex::encode(&packed));
+        
+        // Python produces 29 bytes for this structure
+        assert!(packed.len() <= 30, "Packed data too large: {} bytes", packed.len());
+    }
 }

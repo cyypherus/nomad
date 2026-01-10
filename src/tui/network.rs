@@ -12,6 +12,12 @@ pub struct SavedNode {
     pub name: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct AnnounceEntry {
+    pub hash: [u8; 16],
+    pub name: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
 pub enum ViewerState {
@@ -31,7 +37,7 @@ pub enum LeftPanelMode {
 
 pub struct NetworkView {
     saved_nodes: Vec<SavedNode>,
-    announces: Vec<[u8; 16]>,
+    announces: Vec<AnnounceEntry>,
     selected: usize,
     left_mode: LeftPanelMode,
 
@@ -64,9 +70,13 @@ impl NetworkView {
         }
     }
 
-    pub fn add_announce(&mut self, hash: [u8; 16]) {
-        if !self.announces.contains(&hash) {
-            self.announces.push(hash);
+    pub fn add_announce(&mut self, hash: [u8; 16], name: Option<String>) {
+        if let Some(existing) = self.announces.iter_mut().find(|a| a.hash == hash) {
+            if name.is_some() {
+                existing.name = name;
+            }
+        } else {
+            self.announces.push(AnnounceEntry { hash, name });
         }
     }
 
@@ -124,8 +134,8 @@ impl NetworkView {
                 (node.hash, Some(node.name.clone()))
             }
             LeftPanelMode::Announces => {
-                let hash = *self.announces.get(self.selected)?;
-                (hash, None)
+                let entry = self.announces.get(self.selected)?;
+                (entry.hash, entry.name.clone())
             }
         };
 
@@ -191,7 +201,7 @@ impl NetworkView {
                 .announces
                 .iter()
                 .enumerate()
-                .map(|(i, hash)| {
+                .map(|(i, entry)| {
                     let style = if i == self.selected {
                         Style::default()
                             .bg(Color::DarkGray)
@@ -199,8 +209,13 @@ impl NetworkView {
                     } else {
                         Style::default()
                     };
-                    let hash_str = hex::encode(hash);
-                    let display = hash_str[..16].to_string();
+                    let display = match &entry.name {
+                        Some(name) => name.clone(),
+                        None => {
+                            let hash_str = hex::encode(entry.hash);
+                            hash_str[..16].to_string()
+                        }
+                    };
                     ListItem::new(Line::from(vec![
                         Span::styled("Ⓝ  ", Style::default().fg(Color::Yellow)),
                         Span::raw(display),

@@ -83,6 +83,10 @@ impl NomadApp {
         self.dest_hash
     }
 
+    pub fn testnet_address(&self) -> &str {
+        &self.config.network.testnet
+    }
+
     pub async fn announce_events(&self) -> tokio::sync::broadcast::Receiver<AnnounceEvent> {
         self.node.announce_events().await
     }

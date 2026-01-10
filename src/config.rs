@@ -34,7 +34,7 @@ pub struct NodeConfig {
 impl Default for NetworkConfig {
     fn default() -> Self {
         Self {
-            testnet: "amsterdam.connect.reticulum.network:4965".to_string(),
+            testnet: "reticulum.qortal.link:4242".to_string(),
             custom_interface: None,
         }
     }

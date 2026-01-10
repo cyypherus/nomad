@@ -26,14 +26,23 @@ use super::tabs::{Tab, TabBar};
 
 #[derive(Debug, Clone)]
 pub enum NetworkEvent {
-    AnnounceReceived([u8; 16]),
+    AnnounceReceived {
+        hash: [u8; 16],
+        name: Option<String>,
+    },
     AnnounceSent,
     Status(String),
     MessageReceived([u8; DESTINATION_LENGTH]),
     ConversationsUpdated(Vec<ConversationInfo>),
     MessagesLoaded(Vec<StoredMessage>),
-    PageReceived { url: String, content: String },
-    ConnectionFailed { url: String, reason: String },
+    PageReceived {
+        url: String,
+        content: String,
+    },
+    ConnectionFailed {
+        url: String,
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -46,7 +55,10 @@ pub enum TuiCommand {
         destination: [u8; DESTINATION_LENGTH],
     },
     MarkConversationRead([u8; DESTINATION_LENGTH]),
-    ConnectToNode { hash: [u8; 16], path: String },
+    ConnectToNode {
+        hash: [u8; 16],
+        path: String,
+    },
 }
 
 pub struct TuiApp {
@@ -107,8 +119,8 @@ impl TuiApp {
     fn poll_events(&mut self) {
         while let Ok(event) = self.event_rx.try_recv() {
             match event {
-                NetworkEvent::AnnounceReceived(hash) => {
-                    self.network.add_announce(hash);
+                NetworkEvent::AnnounceReceived { hash, name } => {
+                    self.network.add_announce(hash, name);
                     self.announces_received += 1;
                     self.set_status("Announce received");
                 }
@@ -392,7 +404,11 @@ impl TuiApp {
 
     fn handle_announce(&mut self) {
         if self.tab == Tab::Network {
-            let _ = self.cmd_tx.blocking_send(TuiCommand::Announce);
+            self.set_status("Sending announce command...");
+            match self.cmd_tx.blocking_send(TuiCommand::Announce) {
+                Ok(_) => {}
+                Err(e) => self.set_status(&format!("Failed to send: {}", e)),
+            }
         }
     }
 
