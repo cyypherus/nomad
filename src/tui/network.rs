@@ -114,6 +114,10 @@ impl NetworkView {
         self.last_announce_secs = secs;
     }
 
+    pub fn update_announce_time(&mut self) {
+        self.last_announce_secs = 0;
+    }
+
     pub fn connect_selected(&mut self) {
         match self.left_mode {
             LeftPanelMode::Nodes => {

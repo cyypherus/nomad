@@ -107,4 +107,8 @@ impl NomadApp {
     ) -> tokio::sync::broadcast::Receiver<reticulum::transport::AnnounceEvent> {
         self.node.announce_events().await
     }
+
+    pub async fn announce(&self) {
+        self.node.announce().await;
+    }
 }

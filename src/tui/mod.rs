@@ -5,4 +5,4 @@ mod directory;
 mod network;
 mod tabs;
 
-pub use app::TuiApp;
+pub use app::{NetworkEvent, TuiApp, TuiCommand};

@@ -10,20 +10,22 @@ use tokio::sync::mpsc;
 use tokio::sync::Mutex;
 
 use app::NomadApp;
-use tui::TuiApp;
+use tui::{NetworkEvent, TuiApp, TuiCommand};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let nomad = Arc::new(Mutex::new(NomadApp::new().await?));
     let dest_hash = nomad.lock().await.dest_hash();
 
-    let (announce_tx, announce_rx) = mpsc::channel(100);
+    let (event_tx, event_rx) = mpsc::channel::<NetworkEvent>(100);
+    let (cmd_tx, mut cmd_rx) = mpsc::channel::<TuiCommand>(100);
     let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
 
     let nomad_clone = nomad.clone();
+    let event_tx_clone = event_tx.clone();
     let network_task = tokio::spawn(async move {
         let mut app = nomad_clone.lock().await;
-        let mut rx = app.announce_events().await;
+        let mut announce_rx = app.announce_events().await;
         drop(app);
 
         loop {
@@ -31,13 +33,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 _ = shutdown_rx.recv() => {
                     break;
                 }
-                result = rx.recv() => {
+                result = announce_rx.recv() => {
                     if let Ok(event) = result {
                         let dest = event.destination.lock().await;
                         let hash = dest.desc.address_hash;
                         let mut hash_bytes = [0u8; 16];
                         hash_bytes.copy_from_slice(hash.as_slice());
-                        let _ = announce_tx.send(hash_bytes).await;
+                        let _ = event_tx_clone.send(NetworkEvent::AnnounceReceived(hash_bytes)).await;
+                    }
+                }
+                Some(cmd) = cmd_rx.recv() => {
+                    match cmd {
+                        TuiCommand::Announce => {
+                            let _ = event_tx_clone.send(NetworkEvent::Status("Announcing...".to_string())).await;
+                            let mut app = nomad_clone.lock().await;
+                            app.announce().await;
+                            let _ = event_tx_clone.send(NetworkEvent::Status("Announced".to_string())).await;
+                            let _ = event_tx_clone.send(NetworkEvent::AnnounceSent).await;
+                        }
                     }
                 }
             }
@@ -45,7 +58,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let tui_result = tokio::task::spawn_blocking(move || {
-        let mut tui = TuiApp::new(dest_hash, announce_rx)?;
+        let mut tui = TuiApp::new(dest_hash, event_rx, cmd_tx)?;
         tui.run()
     })
     .await?;

@@ -1,5 +1,5 @@
 use std::io::{self, Stdout};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
@@ -10,9 +10,9 @@ use crossterm::{
     },
 };
 use ratatui::{
-    layout::{Constraint, Layout},
+    layout::{Alignment, Constraint, Layout, Rect},
     prelude::CrosstermBackend,
-    style::{Color, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::Paragraph,
     Terminal,
@@ -23,6 +23,18 @@ use super::conversations::ConversationsView;
 use super::network::NetworkView;
 use super::tabs::{Tab, TabBar};
 
+#[derive(Debug, Clone)]
+pub enum NetworkEvent {
+    AnnounceReceived([u8; 16]),
+    AnnounceSent,
+    Status(String),
+}
+
+#[derive(Debug, Clone)]
+pub enum TuiCommand {
+    Announce,
+}
+
 pub struct TuiApp {
     terminal: Terminal<CrosstermBackend<Stdout>>,
     running: bool,
@@ -30,11 +42,20 @@ pub struct TuiApp {
     dest_hash: [u8; 16],
     conversations: ConversationsView,
     network: NetworkView,
-    announce_rx: mpsc::Receiver<[u8; 16]>,
+    event_rx: mpsc::Receiver<NetworkEvent>,
+    cmd_tx: mpsc::Sender<TuiCommand>,
+    status_message: Option<String>,
+    status_time: Option<Instant>,
+    announces_received: usize,
+    announces_sent: usize,
 }
 
 impl TuiApp {
-    pub fn new(dest_hash: [u8; 16], announce_rx: mpsc::Receiver<[u8; 16]>) -> io::Result<Self> {
+    pub fn new(
+        dest_hash: [u8; 16],
+        event_rx: mpsc::Receiver<NetworkEvent>,
+        cmd_tx: mpsc::Sender<TuiCommand>,
+    ) -> io::Result<Self> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
         execute!(stdout, EnterAlternateScreen, Clear(ClearType::All))?;
@@ -49,26 +70,60 @@ impl TuiApp {
             dest_hash,
             conversations: ConversationsView::new(),
             network: NetworkView::new(dest_hash),
-            announce_rx,
+            event_rx,
+            cmd_tx,
+            status_message: None,
+            status_time: None,
+            announces_received: 0,
+            announces_sent: 0,
         })
     }
 
     pub fn run(&mut self) -> io::Result<()> {
         while self.running {
-            self.poll_announces();
+            self.poll_events();
             self.draw()?;
             self.handle_events()?;
         }
         Ok(())
     }
 
-    fn poll_announces(&mut self) {
-        while let Ok(hash) = self.announce_rx.try_recv() {
-            self.network.add_announce(hash);
+    fn poll_events(&mut self) {
+        while let Ok(event) = self.event_rx.try_recv() {
+            match event {
+                NetworkEvent::AnnounceReceived(hash) => {
+                    self.network.add_announce(hash);
+                    self.announces_received += 1;
+                    self.set_status("Announce received");
+                }
+                NetworkEvent::AnnounceSent => {
+                    self.announces_sent += 1;
+                    self.network.update_announce_time();
+                }
+                NetworkEvent::Status(msg) => {
+                    self.set_status(&msg);
+                }
+            }
+        }
+
+        if let Some(time) = self.status_time {
+            if time.elapsed() > Duration::from_secs(3) {
+                self.status_message = None;
+                self.status_time = None;
+            }
         }
     }
 
+    fn set_status(&mut self, msg: &str) {
+        self.status_message = Some(msg.to_string());
+        self.status_time = Some(Instant::now());
+    }
+
     fn draw(&mut self) -> io::Result<()> {
+        let status_msg = self.status_message.clone();
+        let announces_rx = self.announces_received;
+        let announces_tx = self.announces_sent;
+
         self.terminal.draw(|frame| {
             let area = frame.area();
             let chunks = Layout::vertical([
@@ -78,7 +133,29 @@ impl TuiApp {
             ])
             .split(area);
 
-            frame.render_widget(TabBar::new(self.tab), chunks[0]);
+            let top_chunks =
+                Layout::horizontal([Constraint::Min(40), Constraint::Length(30)]).split(chunks[0]);
+
+            frame.render_widget(TabBar::new(self.tab), top_chunks[0]);
+
+            let activity = Line::from(vec![
+                Span::styled("↓", Style::default().fg(Color::Green)),
+                Span::raw(format!("{} ", announces_rx)),
+                Span::styled("↑", Style::default().fg(Color::Cyan)),
+                Span::raw(format!("{} ", announces_tx)),
+                if let Some(ref msg) = status_msg {
+                    Span::styled(
+                        msg,
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    )
+                } else {
+                    Span::styled("●", Style::default().fg(Color::Green))
+                },
+            ]);
+            let activity_widget = Paragraph::new(activity).alignment(Alignment::Right);
+            frame.render_widget(activity_widget, top_chunks[1]);
 
             match self.tab {
                 Tab::Conversations => frame.render_widget(&self.conversations, chunks[1]),
@@ -97,10 +174,10 @@ impl TuiApp {
                 Tab::Network => Line::from(vec![
                     Span::styled("[C-l]", Style::default().fg(Color::Yellow)),
                     Span::raw(" Nodes/Announces  "),
+                    Span::styled("[a]", Style::default().fg(Color::Yellow)),
+                    Span::raw(" Announce  "),
                     Span::styled("[Enter]", Style::default().fg(Color::Yellow)),
                     Span::raw(" Connect  "),
-                    Span::styled("[C-r]", Style::default().fg(Color::Yellow)),
-                    Span::raw(" Reload  "),
                     Span::styled("[q]", Style::default().fg(Color::Yellow)),
                     Span::raw(" Quit"),
                 ]),
@@ -129,6 +206,7 @@ impl TuiApp {
                     (KeyCode::Up | KeyCode::Char('k'), false) => self.handle_up(),
                     (KeyCode::Enter, false) => self.handle_enter(),
                     (KeyCode::Char('l'), true) => self.handle_ctrl_l(),
+                    (KeyCode::Char('a'), false) => self.handle_announce(),
                     _ => {}
                 }
             }
@@ -160,6 +238,12 @@ impl TuiApp {
     fn handle_ctrl_l(&mut self) {
         if self.tab == Tab::Network {
             self.network.toggle_left_mode();
+        }
+    }
+
+    fn handle_announce(&mut self) {
+        if self.tab == Tab::Network {
+            let _ = self.cmd_tx.blocking_send(TuiCommand::Announce);
         }
     }
 }
