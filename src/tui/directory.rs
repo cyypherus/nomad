@@ -36,6 +36,15 @@ impl DirectoryView {
         }
     }
 
+    pub fn add_node(&mut self, hash: [u8; 16]) {
+        let hash_str = hex::encode(hash);
+        self.add_announce(hash_str, None);
+    }
+
+    pub fn node_count(&self) -> usize {
+        self.announces.len()
+    }
+
     pub fn select_next(&mut self) {
         if !self.announces.is_empty() {
             self.selected = (self.selected + 1) % self.announces.len();

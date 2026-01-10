@@ -2,8 +2,8 @@ use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Color, Modifier, Style},
-    text::Line,
-    widgets::{Block, Borders, Tabs as RatTabs, Widget},
+    text::{Line, Span},
+    widgets::{Block, Widget},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -11,41 +11,29 @@ pub enum Tab {
     #[default]
     Conversations,
     Network,
-    Guide,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 3] = [Tab::Conversations, Tab::Network, Tab::Guide];
+    pub const ALL: [Tab; 2] = [Tab::Conversations, Tab::Network];
 
     pub fn title(&self) -> &'static str {
         match self {
             Tab::Conversations => "Conversations",
             Tab::Network => "Network",
-            Tab::Guide => "Guide",
         }
     }
 
     pub fn next(&self) -> Tab {
         match self {
             Tab::Conversations => Tab::Network,
-            Tab::Network => Tab::Guide,
-            Tab::Guide => Tab::Conversations,
+            Tab::Network => Tab::Conversations,
         }
     }
 
     pub fn prev(&self) -> Tab {
         match self {
-            Tab::Conversations => Tab::Guide,
+            Tab::Conversations => Tab::Network,
             Tab::Network => Tab::Conversations,
-            Tab::Guide => Tab::Network,
-        }
-    }
-
-    fn index(&self) -> usize {
-        match self {
-            Tab::Conversations => 0,
-            Tab::Network => 1,
-            Tab::Guide => 2,
         }
     }
 }
@@ -62,18 +50,24 @@ impl TabBar {
 
 impl Widget for TabBar {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let titles: Vec<Line> = Tab::ALL.iter().map(|t| Line::from(t.title())).collect();
+        let mut spans = vec![Span::raw(" + ")];
 
-        let tabs = RatTabs::new(titles)
-            .block(Block::default().borders(Borders::BOTTOM))
-            .select(self.selected.index())
-            .style(Style::default().fg(Color::White))
-            .highlight_style(
+        for tab in Tab::ALL {
+            let style = if tab == self.selected {
                 Style::default()
                     .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            );
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::White)
+            };
+            spans.push(Span::styled("[ ", Style::default().fg(Color::DarkGray)));
+            spans.push(Span::styled(tab.title(), style));
+            spans.push(Span::styled(" ]", Style::default().fg(Color::DarkGray)));
+            spans.push(Span::raw(" "));
+        }
 
-        tabs.render(area, buf);
+        let line = Line::from(spans);
+        let para = ratatui::widgets::Paragraph::new(line).block(Block::default());
+        para.render(area, buf);
     }
 }

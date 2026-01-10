@@ -2,7 +2,7 @@ use std::io::{self, Stdout};
 use std::time::Duration;
 
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind},
+    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -10,13 +10,14 @@ use ratatui::{
     layout::{Constraint, Layout},
     prelude::CrosstermBackend,
     style::{Color, Style},
+    text::{Line, Span},
     widgets::Paragraph,
     Terminal,
 };
+use tokio::sync::mpsc;
 
-use super::browser::BrowserView;
 use super::conversations::ConversationsView;
-use super::directory::DirectoryView;
+use super::network::NetworkView;
 use super::tabs::{Tab, TabBar};
 
 pub struct TuiApp {
@@ -25,12 +26,12 @@ pub struct TuiApp {
     tab: Tab,
     dest_hash: [u8; 16],
     conversations: ConversationsView,
-    browser: BrowserView,
-    directory: DirectoryView,
+    network: NetworkView,
+    announce_rx: mpsc::Receiver<[u8; 16]>,
 }
 
 impl TuiApp {
-    pub fn new(dest_hash: [u8; 16]) -> io::Result<Self> {
+    pub fn new(dest_hash: [u8; 16], announce_rx: mpsc::Receiver<[u8; 16]>) -> io::Result<Self> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
         execute!(stdout, EnterAlternateScreen)?;
@@ -43,24 +44,31 @@ impl TuiApp {
             tab: Tab::default(),
             dest_hash,
             conversations: ConversationsView::new(),
-            browser: BrowserView::new(),
-            directory: DirectoryView::new(),
+            network: NetworkView::new(dest_hash),
+            announce_rx,
         })
     }
 
     pub fn run(&mut self) -> io::Result<()> {
         while self.running {
+            self.poll_announces();
             self.draw()?;
             self.handle_events()?;
         }
         Ok(())
     }
 
+    fn poll_announces(&mut self) {
+        while let Ok(hash) = self.announce_rx.try_recv() {
+            self.network.add_announce(hash);
+        }
+    }
+
     fn draw(&mut self) -> io::Result<()> {
         self.terminal.draw(|frame| {
             let area = frame.area();
             let chunks = Layout::vertical([
-                Constraint::Length(2),
+                Constraint::Length(1),
                 Constraint::Min(1),
                 Constraint::Length(1),
             ])
@@ -70,12 +78,31 @@ impl TuiApp {
 
             match self.tab {
                 Tab::Conversations => frame.render_widget(&self.conversations, chunks[1]),
-                Tab::Network => frame.render_widget(&self.browser, chunks[1]),
-                Tab::Guide => frame.render_widget(&self.directory, chunks[1]),
+                Tab::Network => frame.render_widget(&self.network, chunks[1]),
             }
 
-            let status = Paragraph::new(format!(" Address: {}", hex::encode(self.dest_hash)))
-                .style(Style::default().fg(Color::Cyan).bg(Color::DarkGray));
+            let keybinds = match self.tab {
+                Tab::Conversations => Line::from(vec![
+                    Span::styled("[Tab]", Style::default().fg(Color::Yellow)),
+                    Span::raw(" Switch  "),
+                    Span::styled("[j/k]", Style::default().fg(Color::Yellow)),
+                    Span::raw(" Navigate  "),
+                    Span::styled("[q]", Style::default().fg(Color::Yellow)),
+                    Span::raw(" Quit"),
+                ]),
+                Tab::Network => Line::from(vec![
+                    Span::styled("[C-l]", Style::default().fg(Color::Yellow)),
+                    Span::raw(" Nodes/Announces  "),
+                    Span::styled("[Enter]", Style::default().fg(Color::Yellow)),
+                    Span::raw(" Connect  "),
+                    Span::styled("[C-r]", Style::default().fg(Color::Yellow)),
+                    Span::raw(" Reload  "),
+                    Span::styled("[q]", Style::default().fg(Color::Yellow)),
+                    Span::raw(" Quit"),
+                ]),
+            };
+
+            let status = Paragraph::new(keybinds).style(Style::default().bg(Color::DarkGray));
             frame.render_widget(status, chunks[2]);
         })?;
         Ok(())
@@ -87,12 +114,17 @@ impl TuiApp {
                 if key.kind != KeyEventKind::Press {
                     return Ok(());
                 }
-                match key.code {
-                    KeyCode::Char('q') => self.running = false,
-                    KeyCode::Tab => self.tab = self.tab.next(),
-                    KeyCode::BackTab => self.tab = self.tab.prev(),
-                    KeyCode::Down | KeyCode::Char('j') => self.handle_down(),
-                    KeyCode::Up | KeyCode::Char('k') => self.handle_up(),
+
+                let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+
+                match (key.code, ctrl) {
+                    (KeyCode::Char('q'), false) => self.running = false,
+                    (KeyCode::Tab, false) => self.tab = self.tab.next(),
+                    (KeyCode::BackTab, false) => self.tab = self.tab.prev(),
+                    (KeyCode::Down | KeyCode::Char('j'), false) => self.handle_down(),
+                    (KeyCode::Up | KeyCode::Char('k'), false) => self.handle_up(),
+                    (KeyCode::Enter, false) => self.handle_enter(),
+                    (KeyCode::Char('l'), true) => self.handle_ctrl_l(),
                     _ => {}
                 }
             }
@@ -103,16 +135,27 @@ impl TuiApp {
     fn handle_down(&mut self) {
         match self.tab {
             Tab::Conversations => self.conversations.select_next(),
-            Tab::Network => self.browser.scroll_down(),
-            Tab::Guide => self.directory.select_next(),
+            Tab::Network => self.network.select_next(),
         }
     }
 
     fn handle_up(&mut self) {
         match self.tab {
             Tab::Conversations => self.conversations.select_prev(),
-            Tab::Network => self.browser.scroll_up(),
-            Tab::Guide => self.directory.select_prev(),
+            Tab::Network => self.network.select_prev(),
+        }
+    }
+
+    fn handle_enter(&mut self) {
+        match self.tab {
+            Tab::Conversations => {}
+            Tab::Network => self.network.connect_selected(),
+        }
+    }
+
+    fn handle_ctrl_l(&mut self) {
+        if self.tab == Tab::Network {
+            self.network.toggle_left_mode();
         }
     }
 }

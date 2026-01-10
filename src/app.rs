@@ -101,4 +101,10 @@ impl NomadApp {
     pub fn conversations(&self) -> &ConversationManager<SqliteStorage> {
         &self.conversations
     }
+
+    pub async fn announce_events(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<reticulum::transport::AnnounceEvent> {
+        self.node.announce_events().await
+    }
 }
