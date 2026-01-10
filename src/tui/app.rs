@@ -32,6 +32,8 @@ pub enum NetworkEvent {
     MessageReceived([u8; DESTINATION_LENGTH]),
     ConversationsUpdated(Vec<ConversationInfo>),
     MessagesLoaded(Vec<StoredMessage>),
+    PageReceived { url: String, content: String },
+    ConnectionFailed { url: String, reason: String },
 }
 
 #[derive(Debug, Clone)]
@@ -44,6 +46,7 @@ pub enum TuiCommand {
         destination: [u8; DESTINATION_LENGTH],
     },
     MarkConversationRead([u8; DESTINATION_LENGTH]),
+    ConnectToNode { hash: [u8; 16], path: String },
 }
 
 pub struct TuiApp {
@@ -115,6 +118,12 @@ impl TuiApp {
                 }
                 NetworkEvent::Status(msg) => {
                     self.set_status(&msg);
+                }
+                NetworkEvent::PageReceived { url, content } => {
+                    self.network.set_page_content(url, content);
+                }
+                NetworkEvent::ConnectionFailed { url, reason } => {
+                    self.network.set_connection_failed(url, reason);
                 }
                 NetworkEvent::MessageReceived(peer) => {
                     self.unread_count += 1;
@@ -359,7 +368,13 @@ impl TuiApp {
                     }
                 }
             }
-            Tab::Network => self.network.connect_selected(),
+            Tab::Network => {
+                if let Some((hash, path)) = self.network.connect_selected() {
+                    let _ = self
+                        .cmd_tx
+                        .blocking_send(TuiCommand::ConnectToNode { hash, path });
+                }
+            }
         }
     }
 

@@ -13,6 +13,7 @@ pub struct SavedNode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum ViewerState {
     Disconnected,
     Connecting,
@@ -41,7 +42,6 @@ pub struct NetworkView {
     status_message: Option<String>,
 
     our_lxmf_addr: [u8; 16],
-    our_identity: [u8; 16],
     our_name: String,
     last_announce_secs: u64,
 }
@@ -59,7 +59,6 @@ impl NetworkView {
             page_content: None,
             status_message: None,
             our_lxmf_addr,
-            our_identity: [0u8; 16],
             our_name: "Anonymous Peer".to_string(),
             last_announce_secs: 0,
         }
@@ -118,24 +117,47 @@ impl NetworkView {
         self.last_announce_secs = 0;
     }
 
-    pub fn connect_selected(&mut self) {
-        match self.left_mode {
+    pub fn connect_selected(&mut self) -> Option<([u8; 16], String)> {
+        let (hash, name) = match self.left_mode {
             LeftPanelMode::Nodes => {
-                if let Some(node) = self.saved_nodes.get(self.selected) {
-                    self.current_node_name = Some(node.name.clone());
-                    self.current_url = Some(format!("{}:/page/index.mu", hex::encode(node.hash)));
-                    self.viewer_state = ViewerState::Connecting;
-                    self.status_message = Some("Connecting...".to_string());
-                }
+                let node = self.saved_nodes.get(self.selected)?;
+                (node.hash, Some(node.name.clone()))
             }
             LeftPanelMode::Announces => {
-                if let Some(hash) = self.announces.get(self.selected) {
-                    self.current_node_name = None;
-                    self.current_url = Some(format!("{}:/page/index.mu", hex::encode(hash)));
-                    self.viewer_state = ViewerState::Connecting;
-                    self.status_message = Some("Connecting...".to_string());
-                }
+                let hash = *self.announces.get(self.selected)?;
+                (hash, None)
             }
+        };
+
+        let path = "/page/index.mu".to_string();
+        self.current_node_name = name;
+        self.current_url = Some(format!("{}:{}", hex::encode(hash), path));
+        self.viewer_state = ViewerState::Connecting;
+        self.status_message = Some("Connecting...".to_string());
+        self.page_content = None;
+
+        Some((hash, path))
+    }
+
+    pub fn set_page_content(&mut self, url: String, content: String) {
+        if self.current_url.as_ref() == Some(&url) {
+            self.page_content = Some(content);
+            self.viewer_state = ViewerState::Connected;
+            self.status_message = None;
+        }
+    }
+
+    pub fn set_connection_failed(&mut self, url: String, reason: String) {
+        if self.current_url.as_ref() == Some(&url) {
+            self.viewer_state = ViewerState::Failed;
+            self.status_message = Some(reason);
+        }
+    }
+
+    pub fn set_retrieving(&mut self) {
+        if self.viewer_state == ViewerState::Connecting {
+            self.viewer_state = ViewerState::Retrieving;
+            self.status_message = Some("Retrieving page...".to_string());
         }
     }
 
