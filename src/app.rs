@@ -1,7 +1,9 @@
 use lxmf::{LxmfNode, StorageError};
 use reticulum::iface::tcp_client::TcpClient;
+use reticulum::transport::{Transport, TransportConfig};
 use std::sync::Arc;
 use thiserror::Error;
+use tokio::sync::Mutex;
 
 use crate::config::{Config, ConfigError};
 use crate::conversation::{ConversationManager, SqliteStorage};
@@ -22,6 +24,7 @@ pub enum AppError {
 pub struct NomadApp {
     #[allow(dead_code)]
     config: Config,
+    transport: Arc<Mutex<Transport>>,
     node: LxmfNode,
     dest_hash: [u8; 16],
     conversations: ConversationManager<SqliteStorage>,
@@ -34,7 +37,10 @@ impl NomadApp {
 
         log::info!("Identity loaded");
 
-        let mut node = LxmfNode::new(identity.into_inner());
+        let transport_config = TransportConfig::new("nomad", identity.inner().inner(), false);
+        let transport = Arc::new(Mutex::new(Transport::new(transport_config)));
+
+        let mut node = LxmfNode::new(identity.into_inner(), transport.clone());
         let dest_hash = node.register_delivery_destination().await;
 
         log::info!("Our address: {}", hex::encode(dest_hash));
@@ -48,7 +54,10 @@ impl NomadApp {
         let iface = &config.network.testnet;
         log::info!("Connecting to {}", iface);
 
-        node.iface_manager()
+        transport
+            .lock()
+            .await
+            .iface_manager()
             .lock()
             .await
             .spawn(TcpClient::new(iface), TcpClient::spawn);
@@ -58,6 +67,7 @@ impl NomadApp {
 
         Ok(Self {
             config,
+            transport,
             node,
             dest_hash,
             conversations,
@@ -110,5 +120,9 @@ impl NomadApp {
 
     pub async fn announce(&self) {
         self.node.announce().await;
+    }
+
+    pub fn transport(&self) -> &Arc<Mutex<Transport>> {
+        &self.transport
     }
 }

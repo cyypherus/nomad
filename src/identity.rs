@@ -59,6 +59,10 @@ impl Identity {
         Ok(Config::data_dir()?.join("identity"))
     }
 
+    pub fn inner(&self) -> &LxmfIdentity {
+        &self.inner
+    }
+
     pub fn into_inner(self) -> LxmfIdentity {
         self.inner
     }

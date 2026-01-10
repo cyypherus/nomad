@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-lxmf = { path = "../lxmf" }
+lxmf = { path = "../lxmf-shared-transport.wt" }
 reticulum = { path = "../reticulum" }
 micron = { path = "../micron", features = ["ratatui"] }
 
@@ -19,6 +19,8 @@ hex = "0.4"
 log = "0.4"
 env_logger = "0.10"
 rusqlite = { version = "0.32", features = ["bundled"] }
+rmp-serde = "1.3"
+sha2 = "0.10"
 
 [dev-dependencies]
 rand = "0.8"

@@ -10,7 +10,7 @@ use crossterm::{
     },
 };
 use ratatui::{
-    layout::{Alignment, Constraint, Layout, Rect},
+    layout::{Alignment, Constraint, Layout},
     prelude::CrosstermBackend,
     style::{Color, Modifier, Style},
     text::{Line, Span},
@@ -28,18 +28,20 @@ pub enum NetworkEvent {
     AnnounceReceived([u8; 16]),
     AnnounceSent,
     Status(String),
+    PageReceived { url: String, content: String },
+    ConnectionFailed { url: String, reason: String },
 }
 
 #[derive(Debug, Clone)]
 pub enum TuiCommand {
     Announce,
+    ConnectToNode { hash: [u8; 16], path: String },
 }
 
 pub struct TuiApp {
     terminal: Terminal<CrosstermBackend<Stdout>>,
     running: bool,
     tab: Tab,
-    dest_hash: [u8; 16],
     conversations: ConversationsView,
     network: NetworkView,
     event_rx: mpsc::Receiver<NetworkEvent>,
@@ -67,7 +69,6 @@ impl TuiApp {
             terminal,
             running: true,
             tab: Tab::default(),
-            dest_hash,
             conversations: ConversationsView::new(),
             network: NetworkView::new(dest_hash),
             event_rx,
@@ -102,6 +103,12 @@ impl TuiApp {
                 }
                 NetworkEvent::Status(msg) => {
                     self.set_status(&msg);
+                }
+                NetworkEvent::PageReceived { url, content } => {
+                    self.network.set_page_content(url, content);
+                }
+                NetworkEvent::ConnectionFailed { url, reason } => {
+                    self.network.set_connection_failed(url, reason);
                 }
             }
         }
@@ -231,7 +238,13 @@ impl TuiApp {
     fn handle_enter(&mut self) {
         match self.tab {
             Tab::Conversations => {}
-            Tab::Network => self.network.connect_selected(),
+            Tab::Network => {
+                if let Some((hash, path)) = self.network.connect_selected() {
+                    let _ = self
+                        .cmd_tx
+                        .blocking_send(TuiCommand::ConnectToNode { hash, path });
+                }
+            }
         }
     }
 
