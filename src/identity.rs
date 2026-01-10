@@ -22,7 +22,7 @@ pub struct Identity {
 impl Identity {
     pub fn load_or_generate() -> Result<Self, IdentityError> {
         let path = Self::identity_path()?;
-        
+
         if path.exists() {
             Self::load(&path)
         } else {
@@ -40,8 +40,8 @@ impl Identity {
 
     fn load(path: &PathBuf) -> Result<Self, IdentityError> {
         let hex_str = fs::read_to_string(path)?;
-        let inner = LxmfIdentity::from_hex(hex_str.trim())
-            .map_err(|_| IdentityError::InvalidData)?;
+        let inner =
+            LxmfIdentity::from_hex(hex_str.trim()).map_err(|_| IdentityError::InvalidData)?;
         Ok(Self { inner })
     }
 
@@ -49,7 +49,7 @@ impl Identity {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        
+
         let hex_str = self.inner.to_hex();
         fs::write(path, hex_str)?;
         Ok(())

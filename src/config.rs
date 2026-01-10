@@ -11,7 +11,7 @@ pub enum ConfigError {
     Parse(#[from] toml::de::Error),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]
     pub network: NetworkConfig,
@@ -49,19 +49,10 @@ impl Default for NodeConfig {
     }
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            network: NetworkConfig::default(),
-            node: NodeConfig::default(),
-        }
-    }
-}
-
 impl Config {
     pub fn load() -> Result<Self, ConfigError> {
         let config_path = Self::config_path()?;
-        
+
         if config_path.exists() {
             let contents = fs::read_to_string(&config_path)?;
             Ok(toml::from_str(&contents)?)
@@ -74,11 +65,11 @@ impl Config {
 
     pub fn save(&self) -> Result<(), ConfigError> {
         let config_path = Self::config_path()?;
-        
+
         if let Some(parent) = config_path.parent() {
             fs::create_dir_all(parent)?;
         }
-        
+
         let contents = toml::to_string_pretty(self).unwrap();
         fs::write(&config_path, contents)?;
         Ok(())

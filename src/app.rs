@@ -25,21 +25,21 @@ impl NomadApp {
     pub async fn new() -> Result<Self, AppError> {
         let config = Config::load()?;
         let identity = Identity::load_or_generate()?;
-        
+
         log::info!("Identity loaded");
-        
+
         let mut node = LxmfNode::new(identity.into_inner());
         let dest_hash = node.register_delivery_destination().await;
-        
+
         log::info!("Our address: {}", hex::encode(dest_hash));
 
         let iface = &config.network.testnet;
         log::info!("Connecting to {}", iface);
-        
-        node.iface_manager().lock().await.spawn(
-            TcpClient::new(iface),
-            TcpClient::spawn,
-        );
+
+        node.iface_manager()
+            .lock()
+            .await
+            .spawn(TcpClient::new(iface), TcpClient::spawn);
 
         node.announce().await;
         log::info!("Announced on network");

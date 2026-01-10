@@ -1,15 +1,18 @@
 mod app;
 mod config;
 mod identity;
+mod tui;
 
 use app::NomadApp;
+use tui::TuiApp;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    let nomad = NomadApp::new().await?;
+    let dest_hash = nomad.dest_hash();
 
-    let mut app = NomadApp::new().await?;
-    app.run().await?;
+    let mut tui = TuiApp::new(dest_hash)?;
+    tui.run()?;
 
     Ok(())
 }
