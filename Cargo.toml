@@ -14,7 +14,6 @@ crossterm = "0.28"
 
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
-directories = "5"
 thiserror = "1"
 hex = "0.4"
 log = "0.4"

@@ -1,4 +1,3 @@
-use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
@@ -6,8 +5,6 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum ConfigError {
-    #[error("no home directory found")]
-    NoHomeDir,
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("parse error: {0}")]
@@ -88,9 +85,7 @@ impl Config {
     }
 
     pub fn data_dir() -> Result<PathBuf, ConfigError> {
-        let proj_dirs = ProjectDirs::from("", "", "nomad")
-            .ok_or(ConfigError::NoHomeDir)?;
-        Ok(proj_dirs.data_dir().to_path_buf())
+        Ok(PathBuf::from(".nomad"))
     }
 
     fn config_path() -> Result<PathBuf, ConfigError> {
