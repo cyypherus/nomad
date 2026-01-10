@@ -9,8 +9,8 @@ reticulum = { path = "../reticulum" }
 micron = { path = "../micron", features = ["ratatui"] }
 
 tokio = { version = "1", features = ["full"] }
-ratatui = "0.29"
-crossterm = "0.28"
+ratatui = "0.30"
+crossterm = "0.29"
 
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
