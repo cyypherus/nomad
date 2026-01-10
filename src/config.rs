@@ -11,7 +11,7 @@ pub enum ConfigError {
     Parse(#[from] toml::de::Error),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]
     pub network: NetworkConfig,
@@ -45,15 +45,6 @@ impl Default for NodeConfig {
         Self {
             enabled: false,
             pages_path: "pages".to_string(),
-        }
-    }
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            network: NetworkConfig::default(),
-            node: NodeConfig::default(),
         }
     }
 }
