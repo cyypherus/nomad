@@ -61,7 +61,7 @@ impl Default for Config {
 impl Config {
     pub fn load() -> Result<Self, ConfigError> {
         let config_path = Self::config_path()?;
-        
+
         if config_path.exists() {
             let contents = fs::read_to_string(&config_path)?;
             Ok(toml::from_str(&contents)?)
@@ -74,11 +74,11 @@ impl Config {
 
     pub fn save(&self) -> Result<(), ConfigError> {
         let config_path = Self::config_path()?;
-        
+
         if let Some(parent) = config_path.parent() {
             fs::create_dir_all(parent)?;
         }
-        
+
         let contents = toml::to_string_pretty(self).unwrap();
         fs::write(&config_path, contents)?;
         Ok(())

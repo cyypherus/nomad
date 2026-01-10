@@ -1,5 +1,6 @@
 mod app;
 mod config;
+pub mod conversation;
 mod identity;
 
 use app::NomadApp;
