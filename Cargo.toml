@@ -11,6 +11,7 @@ micron = { path = "../micron", features = ["ratatui"] }
 tokio = { version = "1", features = ["full"] }
 ratatui = "0.30"
 crossterm = "0.29"
+tui-input = "0.15"
 
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"

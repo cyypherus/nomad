@@ -24,8 +24,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let nomad_clone = nomad.clone();
     let event_tx_clone = event_tx.clone();
     let network_task = tokio::spawn(async move {
-        let mut app = nomad_clone.lock().await;
+        let app = nomad_clone.lock().await;
         let mut announce_rx = app.announce_events().await;
+        let mut data_rx = app.received_data_events();
         drop(app);
 
         loop {
@@ -40,16 +41,62 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let mut hash_bytes = [0u8; 16];
                         hash_bytes.copy_from_slice(hash.as_slice());
                         let _ = event_tx_clone.send(NetworkEvent::AnnounceReceived(hash_bytes)).await;
+
+                        let mut app = nomad_clone.lock().await;
+                        app.handle_announce(&event).await;
+                    }
+                }
+                result = data_rx.recv() => {
+                    if let Ok(data) = result {
+                        let mut app = nomad_clone.lock().await;
+                        if let Some(msg) = app.handle_received_message(&data) {
+                            let peer = msg.source_hash;
+                            let _ = event_tx_clone.send(NetworkEvent::MessageReceived(peer)).await;
+                        }
                     }
                 }
                 Some(cmd) = cmd_rx.recv() => {
                     match cmd {
                         TuiCommand::Announce => {
                             let _ = event_tx_clone.send(NetworkEvent::Status("Announcing...".to_string())).await;
-                            let mut app = nomad_clone.lock().await;
+                            let app = nomad_clone.lock().await;
                             app.announce().await;
                             let _ = event_tx_clone.send(NetworkEvent::Status("Announced".to_string())).await;
                             let _ = event_tx_clone.send(NetworkEvent::AnnounceSent).await;
+                        }
+                        TuiCommand::LoadConversations => {
+                            let app = nomad_clone.lock().await;
+                            if let Ok(convos) = app.list_conversations() {
+                                let _ = event_tx_clone.send(NetworkEvent::ConversationsUpdated(convos)).await;
+                            }
+                        }
+                        TuiCommand::LoadMessages(peer) => {
+                            let app = nomad_clone.lock().await;
+                            if let Ok(messages) = app.get_conversation(&peer) {
+                                let _ = event_tx_clone.send(NetworkEvent::MessagesLoaded(messages)).await;
+                            }
+                        }
+                        TuiCommand::SendMessage { content, destination } => {
+                            let _ = event_tx_clone.send(NetworkEvent::Status("Sending...".to_string())).await;
+                            let mut app = nomad_clone.lock().await;
+                            match app.send_message(&destination, &content).await {
+                                Ok(_) => {
+                                    let _ = event_tx_clone.send(NetworkEvent::Status("Sent".to_string())).await;
+                                    if let Ok(convos) = app.list_conversations() {
+                                        let _ = event_tx_clone.send(NetworkEvent::ConversationsUpdated(convos)).await;
+                                    }
+                                }
+                                Err(e) => {
+                                    let _ = event_tx_clone.send(NetworkEvent::Status(format!("Failed: {}", e))).await;
+                                }
+                            }
+                        }
+                        TuiCommand::MarkConversationRead(peer) => {
+                            let app = nomad_clone.lock().await;
+                            let _ = app.mark_conversation_read(&peer);
+                            if let Ok(convos) = app.list_conversations() {
+                                let _ = event_tx_clone.send(NetworkEvent::ConversationsUpdated(convos)).await;
+                            }
                         }
                     }
                 }

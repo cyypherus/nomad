@@ -1,5 +1,8 @@
-use lxmf::{LxmfNode, StorageError};
+use lxmf::{
+    ConversationInfo, LxMessage, LxmfNode, StorageError, StoredMessage, DESTINATION_LENGTH,
+};
 use reticulum::iface::tcp_client::TcpClient;
+use reticulum::transport::{AnnounceEvent, ReceivedData};
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -17,6 +20,8 @@ pub enum AppError {
     Io(#[from] std::io::Error),
     #[error("storage error: {0}")]
     Storage(#[from] StorageError),
+    #[error("lxmf error: {0}")]
+    Lxmf(#[from] lxmf::Error),
 }
 
 pub struct NomadApp {
@@ -64,51 +69,68 @@ impl NomadApp {
         })
     }
 
-    pub async fn run(&mut self) -> Result<(), AppError> {
-        log::info!("Starting Nomad...");
-        log::info!("Press Ctrl+C to exit");
-
-        let mut announce_rx = self.node.announce_events().await;
-
-        loop {
-            tokio::select! {
-                _ = tokio::signal::ctrl_c() => {
-                    log::info!("Shutting down...");
-                    break;
-                }
-                result = announce_rx.recv() => {
-                    match result {
-                        Ok(event) => {
-                            let dest = event.destination.lock().await;
-                            let hash = dest.desc.address_hash;
-                            log::info!("Announce: {}", hash);
-                        }
-                        Err(e) => {
-                            log::warn!("Announce channel error: {:?}", e);
-                        }
-                    }
-                }
-            }
-        }
-
-        Ok(())
-    }
-
     pub fn dest_hash(&self) -> [u8; 16] {
         self.dest_hash
     }
 
-    pub fn conversations(&self) -> &ConversationManager<SqliteStorage> {
-        &self.conversations
+    pub async fn announce_events(&self) -> tokio::sync::broadcast::Receiver<AnnounceEvent> {
+        self.node.announce_events().await
     }
 
-    pub async fn announce_events(
-        &self,
-    ) -> tokio::sync::broadcast::Receiver<reticulum::transport::AnnounceEvent> {
-        self.node.announce_events().await
+    pub fn received_data_events(&self) -> tokio::sync::broadcast::Receiver<ReceivedData> {
+        self.node.received_data_events()
     }
 
     pub async fn announce(&self) {
         self.node.announce().await;
+    }
+
+    pub async fn handle_announce(&mut self, event: &AnnounceEvent) {
+        self.node.handle_announce(event).await;
+    }
+
+    pub fn handle_received_message(&mut self, data: &ReceivedData) -> Option<LxMessage> {
+        if let Some(msg) = self.node.handle_received_data(data) {
+            if let Err(e) = self.conversations.handle_incoming(&msg) {
+                log::error!("Failed to store incoming message: {}", e);
+            }
+            Some(msg)
+        } else {
+            None
+        }
+    }
+
+    pub async fn send_message(
+        &mut self,
+        destination: &[u8; DESTINATION_LENGTH],
+        content: &str,
+    ) -> Result<(), AppError> {
+        let mut msg =
+            LxMessage::new(*destination, self.dest_hash).with_content(content.as_bytes().to_vec());
+        msg.incoming = false;
+
+        self.node.send_message(&mut msg).await?;
+
+        self.conversations.handle_outgoing(&msg)?;
+
+        Ok(())
+    }
+
+    pub fn list_conversations(&self) -> Result<Vec<ConversationInfo>, StorageError> {
+        self.conversations.list_conversations()
+    }
+
+    pub fn get_conversation(
+        &self,
+        peer: &[u8; DESTINATION_LENGTH],
+    ) -> Result<Vec<StoredMessage>, StorageError> {
+        self.conversations.get_conversation(peer, None)
+    }
+
+    pub fn mark_conversation_read(
+        &self,
+        peer: &[u8; DESTINATION_LENGTH],
+    ) -> Result<(), StorageError> {
+        self.conversations.mark_conversation_read(peer)
     }
 }

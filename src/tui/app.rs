@@ -9,8 +9,9 @@ use crossterm::{
         LeaveAlternateScreen,
     },
 };
+use lxmf::{ConversationInfo, StoredMessage, DESTINATION_LENGTH};
 use ratatui::{
-    layout::{Alignment, Constraint, Layout, Rect},
+    layout::{Alignment, Constraint, Layout},
     prelude::CrosstermBackend,
     style::{Color, Modifier, Style},
     text::{Line, Span},
@@ -19,7 +20,7 @@ use ratatui::{
 };
 use tokio::sync::mpsc;
 
-use super::conversations::ConversationsView;
+use super::conversations::{ConversationPane, ConversationsView};
 use super::network::NetworkView;
 use super::tabs::{Tab, TabBar};
 
@@ -28,18 +29,27 @@ pub enum NetworkEvent {
     AnnounceReceived([u8; 16]),
     AnnounceSent,
     Status(String),
+    MessageReceived([u8; DESTINATION_LENGTH]),
+    ConversationsUpdated(Vec<ConversationInfo>),
+    MessagesLoaded(Vec<StoredMessage>),
 }
 
 #[derive(Debug, Clone)]
 pub enum TuiCommand {
     Announce,
+    LoadConversations,
+    LoadMessages([u8; DESTINATION_LENGTH]),
+    SendMessage {
+        content: String,
+        destination: [u8; DESTINATION_LENGTH],
+    },
+    MarkConversationRead([u8; DESTINATION_LENGTH]),
 }
 
 pub struct TuiApp {
     terminal: Terminal<CrosstermBackend<Stdout>>,
     running: bool,
     tab: Tab,
-    dest_hash: [u8; 16],
     conversations: ConversationsView,
     network: NetworkView,
     event_rx: mpsc::Receiver<NetworkEvent>,
@@ -48,6 +58,7 @@ pub struct TuiApp {
     status_time: Option<Instant>,
     announces_received: usize,
     announces_sent: usize,
+    unread_count: usize,
 }
 
 impl TuiApp {
@@ -63,11 +74,12 @@ impl TuiApp {
         let mut terminal = Terminal::new(backend)?;
         terminal.clear()?;
 
+        let _ = cmd_tx.blocking_send(TuiCommand::LoadConversations);
+
         Ok(Self {
             terminal,
             running: true,
             tab: Tab::default(),
-            dest_hash,
             conversations: ConversationsView::new(),
             network: NetworkView::new(dest_hash),
             event_rx,
@@ -76,6 +88,7 @@ impl TuiApp {
             status_time: None,
             announces_received: 0,
             announces_sent: 0,
+            unread_count: 0,
         })
     }
 
@@ -103,6 +116,23 @@ impl TuiApp {
                 NetworkEvent::Status(msg) => {
                     self.set_status(&msg);
                 }
+                NetworkEvent::MessageReceived(peer) => {
+                    self.unread_count += 1;
+                    let peer_str = hex::encode(peer);
+                    self.set_status(&format!(
+                        "Message from {}..{}",
+                        &peer_str[..4],
+                        &peer_str[28..]
+                    ));
+                    let _ = self.cmd_tx.blocking_send(TuiCommand::LoadConversations);
+                }
+                NetworkEvent::ConversationsUpdated(convos) => {
+                    self.unread_count = convos.iter().map(|c| c.unread_count).sum();
+                    self.conversations.set_conversations(convos);
+                }
+                NetworkEvent::MessagesLoaded(messages) => {
+                    self.conversations.set_messages(messages);
+                }
             }
         }
 
@@ -123,6 +153,12 @@ impl TuiApp {
         let status_msg = self.status_message.clone();
         let announces_rx = self.announces_received;
         let announces_tx = self.announces_sent;
+        let unread = self.unread_count;
+        let keybinds = self.keybinds_for_tab();
+        let tab = self.tab;
+        let conv_pane = self.conversations.pane();
+        let uses_textarea = conv_pane == ConversationPane::Compose
+            || conv_pane == ConversationPane::NewConversation;
 
         self.terminal.draw(|frame| {
             let area = frame.area();
@@ -134,11 +170,21 @@ impl TuiApp {
             .split(area);
 
             let top_chunks =
-                Layout::horizontal([Constraint::Min(40), Constraint::Length(30)]).split(chunks[0]);
+                Layout::horizontal([Constraint::Min(40), Constraint::Length(35)]).split(chunks[0]);
 
-            frame.render_widget(TabBar::new(self.tab), top_chunks[0]);
+            frame.render_widget(TabBar::new(tab), top_chunks[0]);
 
             let activity = Line::from(vec![
+                if unread > 0 {
+                    Span::styled(
+                        format!("[{}] ", unread),
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    )
+                } else {
+                    Span::raw("")
+                },
                 Span::styled("↓", Style::default().fg(Color::Green)),
                 Span::raw(format!("{} ", announces_rx)),
                 Span::styled("↑", Style::default().fg(Color::Cyan)),
@@ -157,31 +203,13 @@ impl TuiApp {
             let activity_widget = Paragraph::new(activity).alignment(Alignment::Right);
             frame.render_widget(activity_widget, top_chunks[1]);
 
-            match self.tab {
+            match tab {
+                Tab::Conversations if uses_textarea => {
+                    self.conversations.render_input_pane(frame, chunks[1]);
+                }
                 Tab::Conversations => frame.render_widget(&self.conversations, chunks[1]),
                 Tab::Network => frame.render_widget(&self.network, chunks[1]),
             }
-
-            let keybinds = match self.tab {
-                Tab::Conversations => Line::from(vec![
-                    Span::styled("[Tab]", Style::default().fg(Color::Yellow)),
-                    Span::raw(" Switch  "),
-                    Span::styled("[j/k]", Style::default().fg(Color::Yellow)),
-                    Span::raw(" Navigate  "),
-                    Span::styled("[q]", Style::default().fg(Color::Yellow)),
-                    Span::raw(" Quit"),
-                ]),
-                Tab::Network => Line::from(vec![
-                    Span::styled("[C-l]", Style::default().fg(Color::Yellow)),
-                    Span::raw(" Nodes/Announces  "),
-                    Span::styled("[a]", Style::default().fg(Color::Yellow)),
-                    Span::raw(" Announce  "),
-                    Span::styled("[Enter]", Style::default().fg(Color::Yellow)),
-                    Span::raw(" Connect  "),
-                    Span::styled("[q]", Style::default().fg(Color::Yellow)),
-                    Span::raw(" Quit"),
-                ]),
-            };
 
             let status = Paragraph::new(keybinds).style(Style::default().bg(Color::DarkGray));
             frame.render_widget(status, chunks[2]);
@@ -189,24 +217,113 @@ impl TuiApp {
         Ok(())
     }
 
+    fn keybinds_for_tab(&self) -> Line<'static> {
+        match self.tab {
+            Tab::Conversations => self.conversation_keybinds(),
+            Tab::Network => Line::from(vec![
+                Span::styled("[C-l]", Style::default().fg(Color::Yellow)),
+                Span::raw(" Nodes/Announces  "),
+                Span::styled("[a]", Style::default().fg(Color::Yellow)),
+                Span::raw(" Announce  "),
+                Span::styled("[Enter]", Style::default().fg(Color::Yellow)),
+                Span::raw(" Connect  "),
+                Span::styled("[q]", Style::default().fg(Color::Yellow)),
+                Span::raw(" Quit"),
+            ]),
+        }
+    }
+
+    fn conversation_keybinds(&self) -> Line<'static> {
+        match self.conversations.pane() {
+            ConversationPane::List => Line::from(vec![
+                Span::styled("[Tab]", Style::default().fg(Color::Yellow)),
+                Span::raw(" Switch  "),
+                Span::styled("[j/k]", Style::default().fg(Color::Yellow)),
+                Span::raw(" Navigate  "),
+                Span::styled("[Enter]", Style::default().fg(Color::Yellow)),
+                Span::raw(" Open  "),
+                Span::styled("[n]", Style::default().fg(Color::Yellow)),
+                Span::raw(" New  "),
+                Span::styled("[q]", Style::default().fg(Color::Yellow)),
+                Span::raw(" Quit"),
+            ]),
+            ConversationPane::Messages => Line::from(vec![
+                Span::styled("[j/k]", Style::default().fg(Color::Yellow)),
+                Span::raw(" Scroll  "),
+                Span::styled("[Enter]", Style::default().fg(Color::Yellow)),
+                Span::raw(" Reply  "),
+                Span::styled("[Esc]", Style::default().fg(Color::Yellow)),
+                Span::raw(" Back  "),
+            ]),
+            ConversationPane::Compose => Line::from(vec![
+                Span::styled("[Enter]", Style::default().fg(Color::Yellow)),
+                Span::raw(" Send  "),
+                Span::styled("[Esc]", Style::default().fg(Color::Yellow)),
+                Span::raw(" Cancel  "),
+            ]),
+            ConversationPane::NewConversation => Line::from(vec![
+                Span::styled("[Enter]", Style::default().fg(Color::Yellow)),
+                Span::raw(" Continue  "),
+                Span::styled("[Esc]", Style::default().fg(Color::Yellow)),
+                Span::raw(" Cancel  "),
+            ]),
+        }
+    }
+
     fn handle_events(&mut self) -> io::Result<()> {
         if event::poll(Duration::from_millis(100))? {
-            if let Event::Key(key) = event::read()? {
+            let event = event::read()?;
+
+            if let Event::Key(key) = &event {
                 if key.kind != KeyEventKind::Press {
                     return Ok(());
                 }
+            }
 
+            if self.tab == Tab::Conversations {
+                use super::conversations::InputResult;
+                match self.conversations.handle_event(&event) {
+                    InputResult::Consumed => return Ok(()),
+                    InputResult::Back => {
+                        self.conversations.back();
+                        return Ok(());
+                    }
+                    InputResult::SendMessage(content, dest) => {
+                        let _ = self.cmd_tx.blocking_send(TuiCommand::SendMessage {
+                            content,
+                            destination: dest,
+                        });
+                        if let Some(peer) = self.conversations.selected_peer() {
+                            let _ = self.cmd_tx.blocking_send(TuiCommand::LoadMessages(peer));
+                        }
+                        return Ok(());
+                    }
+                    InputResult::NotConsumed => {}
+                }
+            }
+
+            if let Event::Key(key) = event {
                 let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
                 match (key.code, ctrl) {
                     (KeyCode::Char('q'), false) => self.running = false,
-                    (KeyCode::Tab, false) => self.tab = self.tab.next(),
+                    (KeyCode::Char('c'), true) => self.running = false,
+                    (KeyCode::Tab, false) => {
+                        if self.tab == Tab::Conversations
+                            && self.conversations.pane() != ConversationPane::List
+                        {
+                        } else {
+                            self.tab = self.tab.next();
+                        }
+                    }
                     (KeyCode::BackTab, false) => self.tab = self.tab.prev(),
                     (KeyCode::Down | KeyCode::Char('j'), false) => self.handle_down(),
                     (KeyCode::Up | KeyCode::Char('k'), false) => self.handle_up(),
                     (KeyCode::Enter, false) => self.handle_enter(),
+                    (KeyCode::Esc, false) => self.handle_escape(),
                     (KeyCode::Char('l'), true) => self.handle_ctrl_l(),
                     (KeyCode::Char('a'), false) => self.handle_announce(),
+                    (KeyCode::Char('n'), false) => self.handle_new(),
                     _ => {}
                 }
             }
@@ -230,8 +347,25 @@ impl TuiApp {
 
     fn handle_enter(&mut self) {
         match self.tab {
-            Tab::Conversations => {}
+            Tab::Conversations => {
+                let was_list = self.conversations.pane() == ConversationPane::List;
+                self.conversations.enter();
+                if was_list {
+                    if let Some(peer) = self.conversations.selected_peer() {
+                        let _ = self.cmd_tx.blocking_send(TuiCommand::LoadMessages(peer));
+                        let _ = self
+                            .cmd_tx
+                            .blocking_send(TuiCommand::MarkConversationRead(peer));
+                    }
+                }
+            }
             Tab::Network => self.network.connect_selected(),
+        }
+    }
+
+    fn handle_escape(&mut self) {
+        if self.tab == Tab::Conversations {
+            self.conversations.back();
         }
     }
 
@@ -244,6 +378,12 @@ impl TuiApp {
     fn handle_announce(&mut self) {
         if self.tab == Tab::Network {
             let _ = self.cmd_tx.blocking_send(TuiCommand::Announce);
+        }
+    }
+
+    fn handle_new(&mut self) {
+        if self.tab == Tab::Conversations && self.conversations.pane() == ConversationPane::List {
+            self.conversations.start_new_conversation();
         }
     }
 }
