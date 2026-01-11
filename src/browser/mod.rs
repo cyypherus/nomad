@@ -389,6 +389,14 @@ impl Browser {
         }
     }
 
+    pub fn selected_link_url(&self) -> Option<&str> {
+        let interactive = self.interactives.get(self.selected)?;
+        match &interactive.kind {
+            InteractiveKind::Link { url } => Some(url),
+            _ => None,
+        }
+    }
+
     pub fn interactive_count(&self) -> usize {
         self.interactives.len()
     }

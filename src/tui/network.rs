@@ -1,9 +1,9 @@
-use micron::{parse as parse_micron, render as render_micron, RenderConfig};
+use crate::browser::{Browser, BrowserAction, InputResult};
 use ratatui::{
     buffer::Buffer,
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
-    text::{Line, Span, Text},
+    text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, Paragraph, Widget, Wrap},
 };
 use serde::{Deserialize, Serialize};
@@ -83,14 +83,9 @@ pub struct AnnounceEntry {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
-pub enum ViewerState {
-    Disconnected,
-    Connecting,
-    Retrieving,
-    Connected,
-    Failed,
-    TimedOut,
+pub enum FocusArea {
+    NodeList,
+    BrowserView,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,16 +99,16 @@ pub struct NetworkView {
     announces: Vec<AnnounceEntry>,
     selected: usize,
     left_mode: LeftPanelMode,
+    focus: FocusArea,
 
-    viewer_state: ViewerState,
-    current_url: Option<String>,
+    browser: Browser,
     current_node_name: Option<String>,
-    page_content: Option<String>,
-    status_message: Option<String>,
 
     our_lxmf_addr: [u8; 16],
     our_name: String,
     last_announce_secs: u64,
+
+    last_content_area: Rect,
 }
 
 impl NetworkView {
@@ -124,14 +119,13 @@ impl NetworkView {
             announces: Vec::new(),
             selected: 0,
             left_mode: LeftPanelMode::Nodes,
-            viewer_state: ViewerState::Disconnected,
-            current_url: None,
+            focus: FocusArea::NodeList,
+            browser: Browser::new(),
             current_node_name: None,
-            page_content: None,
-            status_message: None,
             our_lxmf_addr,
             our_name: "Anonymous Peer".to_string(),
             last_announce_secs: 0,
+            last_content_area: Rect::default(),
         }
     }
 
@@ -231,6 +225,21 @@ impl NetworkView {
         self.last_announce_secs = 0;
     }
 
+    pub fn focus(&self) -> FocusArea {
+        self.focus
+    }
+
+    pub fn set_focus(&mut self, focus: FocusArea) {
+        self.focus = focus;
+    }
+
+    pub fn toggle_focus(&mut self) {
+        self.focus = match self.focus {
+            FocusArea::NodeList => FocusArea::BrowserView,
+            FocusArea::BrowserView => FocusArea::NodeList,
+        };
+    }
+
     pub fn connect_selected(
         &mut self,
     ) -> Option<([u8; 16], String, Option<[u8; 32]>, Option<[u8; 32]>)> {
@@ -251,35 +260,99 @@ impl NetworkView {
         };
 
         let path = "/page/index.mu".to_string();
+        let url = format!("{}:{}", hex::encode(hash), path);
         self.current_node_name = name;
-        self.current_url = Some(format!("{}:{}", hex::encode(hash), path));
-        self.viewer_state = ViewerState::Connecting;
-        self.status_message = Some("Connecting...".to_string());
-        self.page_content = None;
+        self.browser.navigate(url);
+        self.focus = FocusArea::BrowserView;
 
         Some((hash, path, public_key, verifying_key))
     }
 
     pub fn set_page_content(&mut self, url: String, content: String) {
-        if self.current_url.as_ref() == Some(&url) {
-            self.page_content = Some(content);
-            self.viewer_state = ViewerState::Connected;
-            self.status_message = None;
-        }
+        self.browser.set_content(&url, content);
     }
 
     pub fn set_connection_failed(&mut self, url: String, reason: String) {
-        if self.current_url.as_ref() == Some(&url) {
-            self.viewer_state = ViewerState::Failed;
-            self.status_message = Some(reason);
-        }
+        self.browser.set_failed(&url, reason);
     }
 
     pub fn set_retrieving(&mut self) {
-        if self.viewer_state == ViewerState::Connecting {
-            self.viewer_state = ViewerState::Retrieving;
-            self.status_message = Some("Retrieving page...".to_string());
+        self.browser.set_retrieving();
+    }
+
+    pub fn browser(&self) -> &Browser {
+        &self.browser
+    }
+
+    pub fn browser_mut(&mut self) -> &mut Browser {
+        &mut self.browser
+    }
+
+    pub fn handle_browser_action(&mut self, action: BrowserAction) -> Option<String> {
+        match action {
+            BrowserAction::Navigate { url } => Some(url),
+            BrowserAction::None => None,
         }
+    }
+
+    pub fn browser_scroll_up(&mut self) {
+        self.browser.scroll_up();
+    }
+
+    pub fn browser_scroll_down(&mut self) {
+        self.browser.scroll_down();
+    }
+
+    pub fn browser_scroll_page_up(&mut self) {
+        self.browser.scroll_page_up(self.last_content_area.height);
+    }
+
+    pub fn browser_scroll_page_down(&mut self) {
+        self.browser.scroll_page_down(self.last_content_area.height);
+    }
+
+    pub fn browser_select_next(&mut self) {
+        self.browser.select_next();
+    }
+
+    pub fn browser_select_prev(&mut self) {
+        self.browser.select_prev();
+    }
+
+    pub fn browser_activate(&mut self) -> Option<String> {
+        let action = self.browser.activate();
+        self.handle_browser_action(action)
+    }
+
+    pub fn browser_go_back(&mut self) -> Option<String> {
+        let action = self.browser.go_back();
+        self.handle_browser_action(action)
+    }
+
+    pub fn browser_go_forward(&mut self) -> Option<String> {
+        let action = self.browser.go_forward();
+        self.handle_browser_action(action)
+    }
+
+    pub fn browser_click(&mut self, x: u16, y: u16) -> Option<String> {
+        let action = self.browser.click(x, y, self.last_content_area);
+        self.handle_browser_action(action)
+    }
+
+    pub fn browser_handle_char(&mut self, c: char) -> InputResult {
+        self.browser.handle_text_input(c)
+    }
+
+    pub fn browser_handle_backspace(&mut self) -> InputResult {
+        self.browser.handle_backspace()
+    }
+
+    pub fn browser_cancel_edit(&mut self) {
+        self.browser.cancel_edit();
+    }
+
+    pub fn browser_is_editing(&self) -> bool {
+        self.browser.is_editing()
     }
 
     fn render_saved_nodes(&self, area: Rect, buf: &mut Buffer) {
@@ -392,10 +465,19 @@ impl NetworkView {
         para.render(area, buf);
     }
 
-    fn render_viewer(&self, area: Rect, buf: &mut Buffer) {
+    fn render_viewer(&mut self, area: Rect, buf: &mut Buffer) {
         let title = self.current_node_name.as_deref().unwrap_or("Remote Node");
 
-        let block = Block::default().borders(Borders::ALL).title(title);
+        let border_style = if self.focus == FocusArea::BrowserView {
+            Style::default().fg(Color::Cyan)
+        } else {
+            Style::default()
+        };
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(title)
+            .border_style(border_style);
         let inner = block.inner(area);
         block.render(area, buf);
 
@@ -403,10 +485,10 @@ impl NetworkView {
             return;
         }
 
-        let url_line = if let Some(url) = &self.current_url {
+        let url_line = if let Some(url) = self.browser.current_url() {
             Line::from(vec![
                 Span::styled("Ⓝ  ", Style::default().fg(Color::Cyan)),
-                Span::raw(url.as_str()),
+                Span::raw(url.to_string()),
             ])
         } else {
             Line::from("")
@@ -427,93 +509,23 @@ impl NetworkView {
             inner.height.saturating_sub(2),
         );
 
-        let content: Text = match self.viewer_state {
-            ViewerState::Disconnected => Text::from(vec![
-                Line::from(""),
-                Line::from(""),
-                Line::from(Span::styled(
-                    "Disconnected",
-                    Style::default().fg(Color::DarkGray),
-                )),
-                Line::from(Span::styled("←  →", Style::default().fg(Color::DarkGray))),
-            ]),
-            ViewerState::Connecting => Text::from(vec![
-                Line::from(""),
-                Line::from(Span::styled(
-                    "Connecting...",
-                    Style::default().fg(Color::Yellow),
-                )),
-            ]),
-            ViewerState::Retrieving => Text::from(vec![
-                Line::from(""),
-                Line::from(Span::styled(
-                    "Retrieving",
-                    Style::default().fg(Color::Yellow),
-                )),
-                Line::from(format!("[{}]", self.current_url.as_deref().unwrap_or(""))),
-            ]),
-            ViewerState::Connected => {
-                if let Some(raw_content) = &self.page_content {
-                    let doc = parse_micron(raw_content);
-                    let config = RenderConfig {
-                        width: content_area.width,
-                        ..Default::default()
-                    };
-                    render_micron(&doc, &config)
-                } else {
-                    Text::from(Line::from("(empty page)"))
-                }
-            }
-            ViewerState::Failed => Text::from(vec![
-                Line::from(""),
-                Line::from(Span::styled(
-                    "!",
-                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-                )),
-                Line::from(""),
-                Line::from(Span::styled(
-                    "Request failed",
-                    Style::default().fg(Color::Red),
-                )),
-            ]),
-            ViewerState::TimedOut => Text::from(vec![
-                Line::from(""),
-                Line::from(Span::styled(
-                    "!",
-                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-                )),
-                Line::from(""),
-                Line::from(Span::styled(
-                    "Request timed out",
-                    Style::default().fg(Color::Red),
-                )),
-            ]),
-        };
+        self.last_content_area = content_area;
+        self.browser.render_content(content_area, buf);
 
-        let is_connected = self.viewer_state == ViewerState::Connected;
-        let para = if is_connected {
-            Paragraph::new(content)
-        } else {
-            Paragraph::new(content).alignment(ratatui::layout::Alignment::Center)
-        };
-        para.render(content_area, buf);
-
-        if let Some(msg) = &self.status_message {
-            if content_area.height > 0 {
+        if let Some(link_url) = self.browser.selected_link_url() {
+            if content_area.height > 1 {
                 let status_y = content_area.y + content_area.height - 1;
                 let status_area = Rect::new(content_area.x, status_y, content_area.width, 1);
-                let divider = "┄".repeat(content_area.width as usize);
-                Paragraph::new(divider).render(status_area, buf);
-                if status_y > content_area.y {
-                    let msg_area = Rect::new(content_area.x, status_y, content_area.width, 1);
-                    Paragraph::new(msg.as_str()).render(msg_area, buf);
-                }
+                let status_text = format!("→ {}", link_url);
+                Paragraph::new(status_text)
+                    .style(Style::default().fg(Color::DarkGray))
+                    .render(status_area, buf);
             }
         }
     }
 }
 
-impl Widget for &NetworkView {
+impl Widget for &mut NetworkView {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let chunks = Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)])
             .split(area);

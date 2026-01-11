@@ -239,7 +239,7 @@ impl TuiApp {
                     self.conversations.render_input_pane(frame, chunks[1]);
                 }
                 Tab::Conversations => frame.render_widget(&self.conversations, chunks[1]),
-                Tab::Network => frame.render_widget(&self.network, chunks[1]),
+                Tab::Network => frame.render_widget(&mut self.network, chunks[1]),
             }
 
             let status = Paragraph::new(keybinds).style(Style::default().bg(Color::DarkGray));
