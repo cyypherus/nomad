@@ -122,6 +122,15 @@ impl NetworkClient {
     }
 }
 
+macro_rules! check_cancelled {
+    ($handle:expr) => {
+        if $handle.is_cancelled() {
+            $handle.cancelled();
+            return Ok(());
+        }
+    };
+}
+
 async fn fetch_page_inner(
     transport: Arc<Mutex<Transport>>,
     known_destinations: Arc<Mutex<HashMap<[u8; 16], DestinationDesc>>>,
@@ -137,13 +146,17 @@ async fn fetch_page_inner(
         transport.lock().await.request_path(&address_hash).await;
 
         handle.set_status(PageStatus::WaitingForAnnounce);
-        let wait_result = wait_for_path(&transport, &address_hash, PATH_REQUEST_TIMEOUT).await;
+        let wait_result =
+            wait_for_path(&transport, &address_hash, &handle, PATH_REQUEST_TIMEOUT).await;
 
         if !wait_result {
+            check_cancelled!(handle);
             handle.fail("No path to node - try again later".into());
             return Ok(());
         }
     }
+
+    check_cancelled!(handle);
 
     if let Some(hops) = transport.lock().await.path_hops(&address_hash).await {
         handle.set_status(PageStatus::PathFound { hops });
@@ -155,6 +168,7 @@ async fn fetch_page_inner(
     }
     .unwrap_or_else(|| node.to_destination_desc());
 
+    check_cancelled!(handle);
     handle.set_status(PageStatus::Connecting);
 
     let tp = transport.lock().await;
@@ -163,15 +177,18 @@ async fn fetch_page_inner(
     let link_id = *link.lock().await.id();
     drop(tp);
 
-    let link_result = wait_for_link_activation(&mut link_events, &link_id, LINK_TIMEOUT).await;
+    let link_result =
+        wait_for_link_activation(&mut link_events, &link_id, &handle, LINK_TIMEOUT).await;
 
     match link_result {
         LinkWaitResult::Activated => {}
         LinkWaitResult::Closed => {
+            check_cancelled!(handle);
             handle.fail("Link closed".into());
             return Ok(());
         }
         LinkWaitResult::Timeout => {
+            check_cancelled!(handle);
             handle.fail("Connection timed out".into());
             return Ok(());
         }
@@ -189,10 +206,12 @@ async fn fetch_page_inner(
     handle.set_status(PageStatus::AwaitingResponse);
 
     let mut resource_manager = ResourceManager::new();
-    let mut parts_received: u32 = 0;
+    let mut current_resource_hash: Option<reticulum::hash::Hash> = None;
     let mut total_parts: u32 = 0;
 
     loop {
+        check_cancelled!(handle);
+
         let event = timeout(Duration::from_secs(60), link_events.recv()).await;
 
         match event {
@@ -244,10 +263,11 @@ async fn fetch_page_inner(
 
                     match result {
                         ResourceHandleResult::RequestParts(hash) => {
+                            current_resource_hash = Some(hash);
                             if let Some(info) = resource_manager.resource_info(&hash) {
                                 total_parts = info.total_parts;
                                 handle.set_status(PageStatus::Retrieving {
-                                    parts_received: 0,
+                                    parts_received: info.received_count,
                                     total_parts,
                                 });
                             }
@@ -259,6 +279,12 @@ async fn fetch_page_inner(
                             }
                         }
                         ResourceHandleResult::Assemble(hash) => {
+                            if let Some(info) = resource_manager.resource_info(&hash) {
+                                handle.set_status(PageStatus::Retrieving {
+                                    parts_received: info.total_parts,
+                                    total_parts: info.total_parts,
+                                });
+                            }
                             if let Some((data, proof_packet)) =
                                 resource_manager.assemble_and_prove(&hash, &link_id, decrypt_fn)
                             {
@@ -282,12 +308,13 @@ async fn fetch_page_inner(
                             }
                         }
                         ResourceHandleResult::None => {
-                            parts_received += 1;
-                            if total_parts > 0 {
-                                handle.set_status(PageStatus::Retrieving {
-                                    parts_received,
-                                    total_parts,
-                                });
+                            if let Some(ref hash) = current_resource_hash {
+                                if let Some(info) = resource_manager.resource_info(hash) {
+                                    handle.set_status(PageStatus::Retrieving {
+                                        parts_received: info.received_count,
+                                        total_parts: info.total_parts,
+                                    });
+                                }
                             }
                         }
                     }
@@ -314,12 +341,16 @@ async fn fetch_page_inner(
 async fn wait_for_path(
     transport: &Arc<Mutex<Transport>>,
     address_hash: &AddressHash,
+    handle: &PageRequestHandle,
     timeout_duration: Duration,
 ) -> bool {
     let start = std::time::Instant::now();
     let check_interval = Duration::from_millis(100);
 
     while start.elapsed() < timeout_duration {
+        if handle.is_cancelled() {
+            return false;
+        }
         if transport.lock().await.has_path(address_hash).await {
             return true;
         }
@@ -338,11 +369,16 @@ enum LinkWaitResult {
 async fn wait_for_link_activation(
     link_events: &mut broadcast::Receiver<reticulum::destination::link::LinkEventData>,
     link_id: &AddressHash,
+    handle: &PageRequestHandle,
     timeout_duration: Duration,
 ) -> LinkWaitResult {
     let deadline = tokio::time::Instant::now() + timeout_duration;
 
     loop {
+        if handle.is_cancelled() {
+            return LinkWaitResult::Closed;
+        }
+
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
             return LinkWaitResult::Timeout;

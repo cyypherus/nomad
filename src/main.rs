@@ -127,6 +127,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         PageStatus::Complete => {
                                             break;
                                         }
+                                        PageStatus::Cancelled => {
+                                            let _ = event_tx.send(NetworkEvent::Status("Cancelled".into())).await;
+                                            return;
+                                        }
                                         PageStatus::Failed(reason) => {
                                             let _ = event_tx.send(NetworkEvent::PageFailed { url: url.clone(), reason: reason.clone() }).await;
                                             return;
