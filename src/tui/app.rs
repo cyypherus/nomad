@@ -156,10 +156,10 @@ impl TuiApp {
                     self.status_bar.set_status(msg);
                 }
                 NetworkEvent::PageReceived { url, content } => {
-                    self.browser.set_page_content(url, content);
+                    self.browser.set_page_content(&url, &content);
                 }
                 NetworkEvent::PageFailed { url, reason } => {
-                    self.browser.set_connection_failed(url, reason);
+                    self.status_bar.set_status(format!("Failed to load {}: {}", url, reason));
                 }
                 NetworkEvent::MessageReceived(_)
                 | NetworkEvent::ConversationsUpdated(_)
@@ -409,14 +409,12 @@ impl TuiApp {
             KeyCode::Left => self.browser.select_prev(),
             KeyCode::Right => self.browser.select_next(),
             KeyCode::Enter => {
-                if let Some((url, form_data)) = self.browser.activate() {
-                    self.navigate_to_link(&url, form_data);
+                if let Some(link) = self.browser.interact() {
+                    self.navigate_to_link(link);
                 }
             }
             KeyCode::Backspace => {
-                if let Some((url, form_data)) = self.browser.go_back() {
-                    self.navigate_to_link(&url, form_data);
-                }
+                self.browser.go_back();
             }
             _ => {}
         }
@@ -436,8 +434,8 @@ impl TuiApp {
 
                 match self.mode {
                     AppMode::Browser => {
-                        if let Some((url, form_data)) = self.browser.click(x, y) {
-                            self.navigate_to_link(&url, form_data);
+                        if let Some(link) = self.browser.click(x, y) {
+                            self.navigate_to_link(link);
                         }
                     }
                     AppMode::Normal => {
@@ -564,7 +562,7 @@ impl TuiApp {
 
     fn connect_to_node(&mut self, node: &NodeInfo) {
         let path = "/page/index.mu".to_string();
-        self.browser.navigate(node, &path);
+        self.browser.set_current_node(node.clone());
         self.mode = AppMode::Browser;
 
         let _ = self.cmd_tx.blocking_send(TuiCommand::FetchPage {
@@ -577,11 +575,7 @@ impl TuiApp {
             .set_status(format!("Connecting to {}...", node.name));
     }
 
-    fn navigate_to_link(
-        &mut self,
-        url: &str,
-        form_data: std::collections::HashMap<String, String>,
-    ) {
+    fn navigate_to_link(&mut self, link: micronaut::Link) {
         let all_nodes: Vec<NodeInfo> = self
             .discovery
             .nodes()
@@ -590,11 +584,12 @@ impl TuiApp {
             .cloned()
             .collect();
 
-        if let Some((node, path)) = self.browser.navigate_to_link(url, &all_nodes) {
+        if let Some((node, path)) = self.browser.resolve_link(&link, &all_nodes) {
+            self.browser.set_current_node(node.clone());
             let _ = self.cmd_tx.blocking_send(TuiCommand::FetchPage {
                 node,
                 path,
-                form_data,
+                form_data: link.form_data,
             });
         }
     }

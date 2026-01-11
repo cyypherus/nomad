@@ -1,5 +1,5 @@
-use crate::browser::{Browser, BrowserAction, InputResult};
 use crate::network::NodeInfo;
+use micronaut::{Browser, BrowserWidget, InputResult, Link, RatatuiRenderer};
 use ratatui::{
     buffer::Buffer,
     layout::{Constraint, Layout, Rect},
@@ -29,7 +29,7 @@ pub struct NetworkView {
     left_mode: LeftPanelMode,
     focus: FocusArea,
 
-    browser: Browser,
+    browser: Browser<RatatuiRenderer>,
     current_node: Option<NodeInfo>,
 
     our_lxmf_addr: [u8; 16],
@@ -49,7 +49,7 @@ impl NetworkView {
             list_offset: 0,
             left_mode: LeftPanelMode::Nodes,
             focus: FocusArea::NodeList,
-            browser: Browser::new(),
+            browser: Browser::new(RatatuiRenderer),
             current_node: None,
             our_lxmf_addr,
             our_name: "Anonymous Peer".to_string(),
@@ -155,19 +155,15 @@ impl NetworkView {
         };
 
         let path = "/page/index.mu".to_string();
-        let url = format!("{}:{}", node.hash_hex(), path);
         self.current_node = Some(node.clone());
-        self.browser.navigate(url);
         self.focus = FocusArea::BrowserView;
 
         Some((node, path))
     }
 
-    pub fn navigate_to_link(
-        &mut self,
-        link_url: &str,
-        form_data: HashMap<String, String>,
-    ) -> Option<(NodeInfo, String, HashMap<String, String>)> {
+    pub fn resolve_link(&self, link: &Link) -> Option<(NodeInfo, String, HashMap<String, String>)> {
+        let link_url = &link.url;
+        
         if let Some(rest) = link_url.strip_prefix(':') {
             if let Some(ref node) = self.current_node {
                 let path = if rest.starts_with('/') {
@@ -175,10 +171,7 @@ impl NetworkView {
                 } else {
                     format!("/{}", rest)
                 };
-                let url = format!("{}:{}", node.hash_hex(), path);
-                let node = node.clone();
-                self.browser.navigate(url);
-                return Some((node, path, form_data));
+                return Some((node.clone(), path, link.form_data.clone()));
             }
             return None;
         }
@@ -208,10 +201,7 @@ impl NetworkView {
                             });
 
                         if let Some(node) = node {
-                            let url = format!("{}:{}", node.hash_hex(), path);
-                            self.current_node = Some(node.clone());
-                            self.browser.navigate(url);
-                            return Some((node, path, form_data));
+                            return Some((node, path, link.form_data.clone()));
                         } else {
                             log::warn!("Cannot navigate to unknown node: {}", hash_hex);
                             return None;
@@ -227,10 +217,7 @@ impl NetworkView {
             } else {
                 format!("/{}", link_url)
             };
-            let url = format!("{}:{}", node.hash_hex(), path);
-            let node = node.clone();
-            self.browser.navigate(url);
-            return Some((node, path, form_data));
+            return Some((node.clone(), path, link.form_data.clone()));
         }
 
         None
@@ -240,51 +227,24 @@ impl NetworkView {
         self.current_node.as_ref()
     }
 
-    pub fn set_page_content(&mut self, url: String, content: String) {
-        let width = if self.last_content_area.width > 0 {
-            self.last_content_area.width
-        } else {
-            80
-        };
-        self.browser.set_content(&url, content, width);
-    }
-
-    pub fn set_connection_failed(&mut self, url: String, reason: String) {
-        self.browser.set_failed(&url, reason);
-    }
-
-    pub fn browser(&self) -> &Browser {
-        &self.browser
-    }
-
-    pub fn browser_mut(&mut self) -> &mut Browser {
-        &mut self.browser
-    }
-
-    pub fn handle_browser_action(
-        &mut self,
-        action: BrowserAction,
-    ) -> Option<(String, HashMap<String, String>)> {
-        match action {
-            BrowserAction::Navigate { url, form_data } => Some((url, form_data)),
-            BrowserAction::None => None,
-        }
+    pub fn set_page_content(&mut self, url: &str, content: &str) {
+        self.browser.set_content(url, content);
     }
 
     pub fn browser_scroll_up(&mut self) {
-        self.browser.scroll_up();
+        self.browser.scroll_by(-1);
     }
 
     pub fn browser_scroll_down(&mut self) {
-        self.browser.scroll_down();
+        self.browser.scroll_by(1);
     }
 
     pub fn browser_scroll_page_up(&mut self) {
-        self.browser.scroll_page_up(self.last_content_area.height);
+        self.browser.scroll_by(-(self.last_content_area.height as i32));
     }
 
     pub fn browser_scroll_page_down(&mut self) {
-        self.browser.scroll_page_down(self.last_content_area.height);
+        self.browser.scroll_by(self.last_content_area.height as i32);
     }
 
     pub fn browser_select_next(&mut self) {
@@ -295,32 +255,35 @@ impl NetworkView {
         self.browser.select_prev();
     }
 
-    pub fn browser_activate(&mut self) -> Option<(String, HashMap<String, String>)> {
-        let action = self.browser.activate();
-        self.handle_browser_action(action)
+    pub fn browser_interact(&mut self) -> Option<Link> {
+        self.browser.interact()
     }
 
-    pub fn browser_go_back(&mut self) -> Option<(String, HashMap<String, String>)> {
-        let action = self.browser.go_back();
-        self.handle_browser_action(action)
+    pub fn browser_go_back(&mut self) -> bool {
+        self.browser.back()
     }
 
-    pub fn browser_go_forward(&mut self) -> Option<(String, HashMap<String, String>)> {
-        let action = self.browser.go_forward();
-        self.handle_browser_action(action)
+    pub fn browser_go_forward(&mut self) -> bool {
+        self.browser.forward()
     }
 
-    pub fn browser_click(&mut self, x: u16, y: u16) -> Option<(String, HashMap<String, String>)> {
-        let action = self.browser.click(x, y, self.last_content_area);
-        self.handle_browser_action(action)
+    pub fn browser_click(&mut self, x: u16, y: u16) -> Option<Link> {
+        let area = self.last_content_area;
+        if x >= area.x && x < area.x + area.width && y >= area.y && y < area.y + area.height {
+            let rel_x = x - area.x;
+            let rel_y = y - area.y;
+            self.browser.click(rel_x, rel_y)
+        } else {
+            None
+        }
     }
 
     pub fn browser_handle_char(&mut self, c: char) -> InputResult {
-        self.browser.handle_text_input(c)
+        self.browser.input_char(c)
     }
 
     pub fn browser_handle_backspace(&mut self) -> InputResult {
-        self.browser.handle_backspace()
+        self.browser.input_backspace()
     }
 
     pub fn browser_cancel_edit(&mut self) {
@@ -329,10 +292,6 @@ impl NetworkView {
 
     pub fn browser_is_editing(&self) -> bool {
         self.browser.is_editing()
-    }
-
-    pub fn browser_toggle_debug(&mut self) {
-        self.browser.toggle_debug_hitboxes();
     }
 
     fn render_left_panel(&mut self, area: Rect, buf: &mut Buffer) {
@@ -420,7 +379,7 @@ impl NetworkView {
             return;
         }
 
-        let url_line = if let Some(url) = self.browser.current_url() {
+        let url_line = if let Some(url) = self.browser.url() {
             Line::from(vec![
                 Span::styled("\u{24c3}  ", Style::default().fg(Color::Cyan)),
                 Span::raw(url.to_string()),
@@ -453,9 +412,9 @@ impl NetworkView {
         };
 
         self.last_content_area = content_area;
-        self.browser.render_content(content_area, buf);
+        BrowserWidget::new(&mut self.browser).render(content_area, buf);
 
-        if let Some(link_url) = self.browser.selected_link_url() {
+        if let Some(link_url) = self.browser.selected_link() {
             if content_area.height > 1 {
                 let status_y = content_area.y + content_area.height - 1;
                 let status_area = Rect::new(content_area.x, status_y, content_area.width, 1);

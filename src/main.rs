@@ -1,5 +1,4 @@
 mod app;
-mod browser;
 mod config;
 pub mod conversation;
 mod identity;

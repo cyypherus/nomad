@@ -1,5 +1,5 @@
-use crate::browser::{Browser, BrowserAction, LoadingState};
 use crate::network::NodeInfo;
+use micronaut::{Browser, BrowserWidget, Link, RatatuiRenderer};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -9,7 +9,7 @@ use ratatui::{
 };
 
 pub struct BrowserView {
-    browser: Browser,
+    browser: Browser<RatatuiRenderer>,
     current_node: Option<NodeInfo>,
     last_content_area: Rect,
 }
@@ -23,18 +23,10 @@ impl Default for BrowserView {
 impl BrowserView {
     pub fn new() -> Self {
         Self {
-            browser: Browser::new(),
+            browser: Browser::new(RatatuiRenderer),
             current_node: None,
             last_content_area: Rect::default(),
         }
-    }
-
-    pub fn browser(&self) -> &Browser {
-        &self.browser
-    }
-
-    pub fn browser_mut(&mut self) -> &mut Browser {
-        &mut self.browser
     }
 
     pub fn current_node(&self) -> Option<&NodeInfo> {
@@ -45,39 +37,24 @@ impl BrowserView {
         self.current_node = Some(node);
     }
 
-    pub fn navigate(&mut self, node: &NodeInfo, path: &str) -> BrowserAction {
-        let url = format!("{}:{}", node.hash_hex(), path);
-        self.current_node = Some(node.clone());
-        self.browser.navigate(url)
-    }
-
-    pub fn set_page_content(&mut self, url: String, content: String) {
-        let width = if self.last_content_area.width > 0 {
-            self.last_content_area.width
-        } else {
-            80
-        };
-        self.browser.set_content(&url, content, width);
-    }
-
-    pub fn set_connection_failed(&mut self, url: String, reason: String) {
-        self.browser.set_failed(&url, reason);
+    pub fn set_page_content(&mut self, url: &str, content: &str) {
+        self.browser.set_content(url, content);
     }
 
     pub fn scroll_up(&mut self) {
-        self.browser.scroll_up();
+        self.browser.scroll_by(-1);
     }
 
     pub fn scroll_down(&mut self) {
-        self.browser.scroll_down();
+        self.browser.scroll_by(1);
     }
 
     pub fn scroll_page_up(&mut self) {
-        self.browser.scroll_page_up(self.last_content_area.height);
+        self.browser.scroll_by(-(self.last_content_area.height as i32));
     }
 
     pub fn scroll_page_down(&mut self) {
-        self.browser.scroll_page_down(self.last_content_area.height);
+        self.browser.scroll_by(self.last_content_area.height as i32);
     }
 
     pub fn select_next(&mut self) {
@@ -88,36 +65,28 @@ impl BrowserView {
         self.browser.select_prev();
     }
 
-    pub fn activate(&mut self) -> Option<(String, std::collections::HashMap<String, String>)> {
-        match self.browser.activate() {
-            BrowserAction::Navigate { url, form_data } => Some((url, form_data)),
-            BrowserAction::None => None,
+    pub fn interact(&mut self) -> Option<Link> {
+        self.browser.interact()
+    }
+
+    pub fn go_back(&mut self) -> bool {
+        self.browser.back()
+    }
+
+    pub fn click(&mut self, x: u16, y: u16) -> Option<Link> {
+        let area = self.last_content_area;
+        if x >= area.x && x < area.x + area.width && y >= area.y && y < area.y + area.height {
+            let rel_x = x - area.x;
+            let rel_y = y - area.y;
+            self.browser.click(rel_x, rel_y)
+        } else {
+            None
         }
     }
 
-    pub fn go_back(&mut self) -> Option<(String, std::collections::HashMap<String, String>)> {
-        match self.browser.go_back() {
-            BrowserAction::Navigate { url, form_data } => Some((url, form_data)),
-            BrowserAction::None => None,
-        }
-    }
-
-    pub fn click(
-        &mut self,
-        x: u16,
-        y: u16,
-    ) -> Option<(String, std::collections::HashMap<String, String>)> {
-        match self.browser.click(x, y, self.last_content_area) {
-            BrowserAction::Navigate { url, form_data } => Some((url, form_data)),
-            BrowserAction::None => None,
-        }
-    }
-
-    pub fn navigate_to_link(
-        &mut self,
-        link_url: &str,
-        known_nodes: &[NodeInfo],
-    ) -> Option<(NodeInfo, String)> {
+    pub fn resolve_link(&self, link: &Link, known_nodes: &[NodeInfo]) -> Option<(NodeInfo, String)> {
+        let link_url = &link.url;
+        
         if let Some(rest) = link_url.strip_prefix(':') {
             if let Some(ref node) = self.current_node {
                 let path = if rest.starts_with('/') {
@@ -125,10 +94,7 @@ impl BrowserView {
                 } else {
                     format!("/{}", rest)
                 };
-                let url = format!("{}:{}", node.hash_hex(), path);
-                let node = node.clone();
-                self.browser.navigate(url);
-                return Some((node, path));
+                return Some((node.clone(), path));
             }
             return None;
         }
@@ -156,9 +122,6 @@ impl BrowserView {
                             });
 
                         if let Some(node) = node {
-                            let url = format!("{}:{}", node.hash_hex(), path);
-                            self.current_node = Some(node.clone());
-                            self.browser.navigate(url);
                             return Some((node, path));
                         }
                     }
@@ -172,10 +135,7 @@ impl BrowserView {
             } else {
                 format!("/{}", link_url)
             };
-            let url = format!("{}:{}", node.hash_hex(), path);
-            let node = node.clone();
-            self.browser.navigate(url);
-            return Some((node, path));
+            return Some((node.clone(), path));
         }
 
         None
@@ -194,19 +154,10 @@ impl Widget for &mut BrowserView {
             .map(|n| n.name.clone())
             .unwrap_or_else(|| "Browser".to_string());
 
-        let title_color = if self.browser.error().is_some() {
-            Color::Red
+        let title_color = if self.browser.url().is_some() {
+            Color::Cyan
         } else {
-            match self.browser.loading_state() {
-                LoadingState::Idle => {
-                    if self.browser.current_url().is_some() {
-                        Color::Cyan
-                    } else {
-                        Color::DarkGray
-                    }
-                }
-                LoadingState::Connecting | LoadingState::Retrieving => Color::Yellow,
-            }
+            Color::DarkGray
         };
 
         let block = Block::default()
@@ -230,7 +181,7 @@ impl Widget for &mut BrowserView {
             return;
         }
 
-        let url_line = if let Some(url) = self.browser.current_url() {
+        let url_line = if let Some(url) = self.browser.url() {
             Line::from(vec![
                 Span::styled("\u{2192} ", Style::default().fg(Color::Cyan)),
                 Span::styled(url.to_string(), Style::default().fg(Color::DarkGray)),
@@ -261,9 +212,9 @@ impl Widget for &mut BrowserView {
         );
 
         self.last_content_area = content_area;
-        self.browser.render_content(content_area, buf);
+        BrowserWidget::new(&mut self.browser).render(content_area, buf);
 
-        if let Some(link_url) = self.browser.selected_link_url() {
+        if let Some(link_url) = self.browser.selected_link() {
             if content_area.height > 1 {
                 let status_y = content_area.y + content_area.height - 1;
                 let status_area = Rect::new(content_area.x, status_y, content_area.width, 1);

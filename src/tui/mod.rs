@@ -1,5 +1,4 @@
 mod app;
-mod browser;
 mod browser_view;
 mod conversations;
 mod directory;

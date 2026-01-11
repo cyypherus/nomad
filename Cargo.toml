@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 lxmf = { path = "../lxmf" }
 reticulum = { path = "../reticulum" }
-micron = { path = "../micron", features = ["ratatui"] }
+micronaut = { path = "../micronaut", features = ["ratatui"] }
 
 tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"
