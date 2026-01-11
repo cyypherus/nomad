@@ -45,6 +45,8 @@ pub enum NetworkEvent {
     MessagesLoaded(Vec<lxmf::StoredMessage>),
     PageReceived { url: String, content: String },
     PageFailed { url: String, reason: String },
+    DownloadComplete { filename: String, path: String },
+    DownloadFailed { filename: String, reason: String },
 }
 
 #[derive(Debug, Clone)]
@@ -62,6 +64,11 @@ pub enum TuiCommand {
         path: String,
         form_data: std::collections::HashMap<String, String>,
     },
+    DownloadFile {
+        node: NodeInfo,
+        path: String,
+        filename: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,6 +76,14 @@ enum AppMode {
     Normal,
     Browser,
     Editing { field_name: String, masked: bool },
+    ConfirmDownload { filename: String },
+}
+
+#[derive(Debug, Clone)]
+struct PendingDownload {
+    node: NodeInfo,
+    path: String,
+    filename: String,
 }
 
 pub struct TuiApp {
@@ -85,6 +100,8 @@ pub struct TuiApp {
     status_bar: StatusBar,
     input: Input,
     last_edit_popup_area: Rect,
+    pending_download: Option<PendingDownload>,
+    last_download_popup_area: Rect,
 
     event_rx: mpsc::Receiver<NetworkEvent>,
     cmd_tx: mpsc::Sender<TuiCommand>,
@@ -131,6 +148,8 @@ impl TuiApp {
             status_bar: StatusBar::new(),
             input: Input::default(),
             last_edit_popup_area: Rect::default(),
+            pending_download: None,
+            last_download_popup_area: Rect::default(),
             event_rx,
             cmd_tx,
             last_main_area: Rect::default(),
@@ -171,6 +190,14 @@ impl TuiApp {
                     self.status_bar
                         .set_status(format!("Failed to load {}: {}", url, reason));
                 }
+                NetworkEvent::DownloadComplete { filename, path } => {
+                    self.status_bar
+                        .set_status(format!("Downloaded {} to {}", filename, path));
+                }
+                NetworkEvent::DownloadFailed { filename, reason } => {
+                    self.status_bar
+                        .set_status(format!("Failed to download {}: {}", filename, reason));
+                }
                 NetworkEvent::MessageReceived(_)
                 | NetworkEvent::ConversationsUpdated(_)
                 | NetworkEvent::MessagesLoaded(_) => {}
@@ -187,6 +214,7 @@ impl TuiApp {
 
         let mut main_area = Rect::default();
         let mut last_edit_popup_area = Rect::default();
+        let mut last_download_popup_area = Rect::default();
 
         self.terminal.draw(|frame| {
             let area = frame.area();
@@ -249,7 +277,7 @@ impl TuiApp {
                     Tab::Saved => frame.render_widget(&mut self.saved, chunks[1]),
                     Tab::MyNode => frame.render_widget(&mut self.mynode, chunks[1]),
                 },
-                AppMode::Browser | AppMode::Editing { .. } => {
+                AppMode::Browser | AppMode::Editing { .. } | AppMode::ConfirmDownload { .. } => {
                     frame.render_widget(&mut self.browser, chunks[1]);
                 }
             }
@@ -291,6 +319,32 @@ impl TuiApp {
                 frame.set_cursor_position((cursor_x, inner_y));
             }
 
+            if let AppMode::ConfirmDownload { filename } = &mode {
+                let content = vec![
+                    Line::from(""),
+                    Line::from(vec![
+                        Span::styled("  File: ", Style::default().fg(Color::DarkGray)),
+                        Span::styled(filename.clone(), Style::default().fg(Color::White)),
+                    ]),
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        "  Download this file?",
+                        Style::default().fg(Color::DarkGray),
+                    )),
+                    Line::from(""),
+                ];
+
+                let modal = Modal::new("Download")
+                    .content(content)
+                    .buttons(vec![
+                        ModalButton::new("Download", Color::Green),
+                        ModalButton::new("Cancel", Color::Red),
+                    ])
+                    .border_color(Color::Yellow);
+
+                last_download_popup_area = modal.render_centered(area, frame.buffer_mut(), 50, 9);
+            }
+
             let footer =
                 Paragraph::new(keybinds.clone()).style(Style::default().bg(Color::Rgb(20, 20, 30)));
             frame.render_widget(footer, chunks[2]);
@@ -298,12 +352,19 @@ impl TuiApp {
 
         self.last_main_area = main_area;
         self.last_edit_popup_area = last_edit_popup_area;
+        self.last_download_popup_area = last_download_popup_area;
 
         Ok(())
     }
 
     fn keybinds_for_mode(&self) -> Line<'static> {
         match &self.mode {
+            AppMode::ConfirmDownload { .. } => Line::from(vec![
+                Span::styled(" [Enter/y]", Style::default().fg(Color::Magenta)),
+                Span::raw(" Download  "),
+                Span::styled("[Esc/n]", Style::default().fg(Color::Magenta)),
+                Span::raw(" Cancel  "),
+            ]),
             AppMode::Editing { .. } => Line::from(vec![
                 Span::styled(" [Enter]", Style::default().fg(Color::Magenta)),
                 Span::raw(" Confirm  "),
@@ -394,12 +455,16 @@ impl TuiApp {
 
                 match &self.mode {
                     AppMode::Editing { .. } => self.handle_editing_key(&evt),
+                    AppMode::ConfirmDownload { .. } => self.handle_download_key(key.code),
                     AppMode::Browser => self.handle_browser_key(key.code),
                     AppMode::Normal => self.handle_normal_key(key.code, ctrl),
                 }
             }
             Event::Mouse(mouse) => {
-                if !matches!(self.mode, AppMode::Editing { .. }) {
+                if !matches!(
+                    self.mode,
+                    AppMode::Editing { .. } | AppMode::ConfirmDownload { .. }
+                ) {
                     self.handle_mouse(mouse.kind, mouse.column, mouse.row);
                 }
             }
@@ -533,6 +598,60 @@ impl TuiApp {
         }
     }
 
+    fn handle_download_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
+                self.confirm_download();
+            }
+            KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+                self.cancel_download();
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_download_modal_click(&mut self, x: u16, y: u16) {
+        let area = self.last_download_popup_area;
+
+        if !area.contains((x, y).into()) {
+            self.cancel_download();
+            return;
+        }
+
+        let modal = Modal::new("")
+            .buttons(vec![
+                ModalButton::new("Download", Color::Green),
+                ModalButton::new("Cancel", Color::Red),
+            ])
+            .selected(0);
+
+        if let Some(idx) = modal.hit_test_buttons(x, y, area) {
+            match idx {
+                0 => self.confirm_download(),
+                1 => self.cancel_download(),
+                _ => {}
+            }
+        }
+    }
+
+    fn confirm_download(&mut self) {
+        if let Some(download) = self.pending_download.take() {
+            self.status_bar
+                .set_status(format!("Downloading {}...", download.filename));
+            let _ = self.cmd_tx.blocking_send(TuiCommand::DownloadFile {
+                node: download.node,
+                path: download.path,
+                filename: download.filename,
+            });
+        }
+        self.mode = AppMode::Browser;
+    }
+
+    fn cancel_download(&mut self) {
+        self.pending_download = None;
+        self.mode = AppMode::Browser;
+    }
+
     fn handle_interaction(&mut self, interaction: micronaut::Interaction) {
         match interaction {
             micronaut::Interaction::Link(link) => {
@@ -551,7 +670,11 @@ impl TuiApp {
     fn reload_page(&mut self) {
         if let Some(node) = self.browser.current_node().cloned() {
             if let Some(url) = self.browser.current_url() {
-                let path = url.to_string();
+                let path = if let Some(idx) = url.find(':') {
+                    url[idx + 1..].to_string()
+                } else {
+                    url.to_string()
+                };
                 self.browser.set_loading(path.clone());
                 let _ = self.cmd_tx.blocking_send(TuiCommand::FetchPage {
                     node,
@@ -596,6 +719,9 @@ impl TuiApp {
                     AppMode::Editing { .. } => {
                         self.handle_edit_modal_click(x, y);
                     }
+                    AppMode::ConfirmDownload { .. } => {
+                        self.handle_download_modal_click(x, y);
+                    }
                     AppMode::Normal => {
                         if self.discovery.is_modal_open() {
                             let modal_action =
@@ -637,12 +763,12 @@ impl TuiApp {
             MouseEventKind::ScrollUp => match &self.mode {
                 AppMode::Browser => self.browser.scroll_up(),
                 AppMode::Normal => self.handle_up(),
-                AppMode::Editing { .. } => {}
+                AppMode::Editing { .. } | AppMode::ConfirmDownload { .. } => {}
             },
             MouseEventKind::ScrollDown => match &self.mode {
                 AppMode::Browser => self.browser.scroll_down(),
                 AppMode::Normal => self.handle_down(),
-                AppMode::Editing { .. } => {}
+                AppMode::Editing { .. } | AppMode::ConfirmDownload { .. } => {}
             },
             _ => {}
         }
@@ -744,14 +870,39 @@ impl TuiApp {
             .cloned()
             .collect();
 
-        if let Some((node, path)) = self.browser.resolve_link(&link, &all_nodes) {
-            self.browser.set_current_node(node.clone());
-            self.browser.set_loading(path.clone());
-            let _ = self.cmd_tx.blocking_send(TuiCommand::FetchPage {
+        use super::link_handler::LinkAction;
+        match self.browser.resolve_link(&link, &all_nodes) {
+            LinkAction::Navigate { node, path } => {
+                self.browser.set_current_node(node.clone());
+                self.browser.set_loading(path.clone());
+                let _ = self.cmd_tx.blocking_send(TuiCommand::FetchPage {
+                    node,
+                    path,
+                    form_data: link.form_data,
+                });
+            }
+            LinkAction::Download {
                 node,
                 path,
-                form_data: link.form_data,
-            });
+                filename,
+            } => {
+                self.pending_download = Some(PendingDownload {
+                    node,
+                    path,
+                    filename: filename.clone(),
+                });
+                self.mode = AppMode::ConfirmDownload { filename };
+            }
+            LinkAction::Lxmf { hash } => {
+                self.status_bar.set_status(format!(
+                    "LXMF links not yet supported: {}",
+                    hex::encode(hash)
+                ));
+            }
+            LinkAction::Unknown { url } => {
+                self.status_bar
+                    .set_status(format!("Unknown link type: {}", url));
+            }
         }
     }
 

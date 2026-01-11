@@ -152,6 +152,85 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             });
                         }
+                        TuiCommand::DownloadFile { node, path, filename } => {
+                            let event_tx = event_tx_clone.clone();
+                            let request = network_client_clone.fetch_page(&node, &path, std::collections::HashMap::new()).await;
+                            let mut status_rx = request.status_receiver();
+                            let filename_clone = filename.clone();
+
+                            tokio::spawn(async move {
+                                loop {
+                                    let status = status_rx.borrow().clone();
+                                    let msg = match &status {
+                                        PageStatus::RequestingPath => format!("Downloading {}: Requesting path...", filename_clone),
+                                        PageStatus::WaitingForAnnounce => format!("Downloading {}: Waiting for announce...", filename_clone),
+                                        PageStatus::PathFound { hops } => format!("Downloading {}: Path found ({} hops)", filename_clone, hops),
+                                        PageStatus::Connecting => format!("Downloading {}: Connecting...", filename_clone),
+                                        PageStatus::LinkEstablished => format!("Downloading {}: Link established", filename_clone),
+                                        PageStatus::SendingRequest => format!("Downloading {}: Sending request...", filename_clone),
+                                        PageStatus::AwaitingResponse => format!("Downloading {}: Awaiting response...", filename_clone),
+                                        PageStatus::Retrieving { parts_received, total_parts } => {
+                                            format!("Downloading {}: {}/{}", filename_clone, parts_received, total_parts)
+                                        }
+                                        PageStatus::Complete => break,
+                                        PageStatus::Cancelled => {
+                                            let _ = event_tx.send(NetworkEvent::DownloadFailed {
+                                                filename: filename_clone,
+                                                reason: "Cancelled".into(),
+                                            }).await;
+                                            return;
+                                        }
+                                        PageStatus::Failed(reason) => {
+                                            let _ = event_tx.send(NetworkEvent::DownloadFailed {
+                                                filename: filename_clone,
+                                                reason: reason.clone(),
+                                            }).await;
+                                            return;
+                                        }
+                                    };
+                                    let _ = event_tx.send(NetworkEvent::Status(msg)).await;
+
+                                    if status_rx.changed().await.is_err() {
+                                        break;
+                                    }
+                                }
+
+                                match request.result().await {
+                                    Ok(content) => {
+                                        let download_dir = std::path::Path::new(".nomad/downloads");
+                                        if let Err(e) = std::fs::create_dir_all(download_dir) {
+                                            let _ = event_tx.send(NetworkEvent::DownloadFailed {
+                                                filename,
+                                                reason: format!("Failed to create downloads dir: {}", e),
+                                            }).await;
+                                            return;
+                                        }
+
+                                        let file_path = download_dir.join(&filename);
+                                        match std::fs::write(&file_path, content.as_bytes()) {
+                                            Ok(_) => {
+                                                let _ = event_tx.send(NetworkEvent::DownloadComplete {
+                                                    filename,
+                                                    path: file_path.display().to_string(),
+                                                }).await;
+                                            }
+                                            Err(e) => {
+                                                let _ = event_tx.send(NetworkEvent::DownloadFailed {
+                                                    filename,
+                                                    reason: format!("Failed to write file: {}", e),
+                                                }).await;
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        let _ = event_tx.send(NetworkEvent::DownloadFailed {
+                                            filename,
+                                            reason: e,
+                                        }).await;
+                                    }
+                                }
+                            });
+                        }
                     }
                 }
                 result = announce_rx.recv() => {

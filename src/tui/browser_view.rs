@@ -137,61 +137,8 @@ impl BrowserView {
         &self,
         link: &Link,
         known_nodes: &[NodeInfo],
-    ) -> Option<(NodeInfo, String)> {
-        let link_url = &link.url;
-
-        if let Some(rest) = link_url.strip_prefix(':') {
-            if let Some(ref node) = self.current_node {
-                let path = if rest.starts_with('/') {
-                    rest.to_string()
-                } else {
-                    format!("/{}", rest)
-                };
-                return Some((node.clone(), path));
-            }
-            return None;
-        }
-
-        if link_url.contains(':') {
-            let parts: Vec<&str> = link_url.splitn(2, ':').collect();
-            if parts.len() == 2 && parts[0].len() == 32 {
-                let hash_hex = parts[0];
-                let path = parts[1].to_string();
-
-                if let Ok(hash_bytes) = hex::decode(hash_hex) {
-                    if hash_bytes.len() == 16 {
-                        let mut hash = [0u8; 16];
-                        hash.copy_from_slice(&hash_bytes);
-
-                        let node = known_nodes
-                            .iter()
-                            .find(|n| n.hash == hash)
-                            .cloned()
-                            .or_else(|| {
-                                self.current_node
-                                    .as_ref()
-                                    .filter(|n| n.hash == hash)
-                                    .cloned()
-                            });
-
-                        if let Some(node) = node {
-                            return Some((node, path));
-                        }
-                    }
-                }
-            }
-        }
-
-        if let Some(ref node) = self.current_node {
-            let path = if link_url.starts_with('/') {
-                link_url.to_string()
-            } else {
-                format!("/{}", link_url)
-            };
-            return Some((node.clone(), path));
-        }
-
-        None
+    ) -> super::link_handler::LinkAction {
+        super::link_handler::resolve_link(&link.url, self.current_node.as_ref(), known_nodes)
     }
 
     pub fn last_content_area(&self) -> Rect {
