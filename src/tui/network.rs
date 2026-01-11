@@ -1,8 +1,9 @@
+use micron::{parse as parse_micron, render as render_micron, RenderConfig};
 use ratatui::{
     buffer::Buffer,
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
-    text::{Line, Span},
+    text::{Line, Span, Text},
     widgets::{Block, Borders, List, ListItem, Paragraph, Widget, Wrap},
 };
 use serde::{Deserialize, Serialize};
@@ -426,75 +427,75 @@ impl NetworkView {
             inner.height.saturating_sub(2),
         );
 
-        let content: Vec<Line> = match self.viewer_state {
-            ViewerState::Disconnected => {
-                vec![
-                    Line::from(""),
-                    Line::from(""),
-                    Line::from(Span::styled(
-                        "Disconnected",
-                        Style::default().fg(Color::DarkGray),
-                    )),
-                    Line::from(Span::styled("←  →", Style::default().fg(Color::DarkGray))),
-                ]
-            }
-            ViewerState::Connecting => {
-                vec![
-                    Line::from(""),
-                    Line::from(Span::styled(
-                        "Connecting...",
-                        Style::default().fg(Color::Yellow),
-                    )),
-                ]
-            }
-            ViewerState::Retrieving => {
-                vec![
-                    Line::from(""),
-                    Line::from(Span::styled(
-                        "Retrieving",
-                        Style::default().fg(Color::Yellow),
-                    )),
-                    Line::from(format!("[{}]", self.current_url.as_deref().unwrap_or(""))),
-                ]
-            }
+        let content: Text = match self.viewer_state {
+            ViewerState::Disconnected => Text::from(vec![
+                Line::from(""),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "Disconnected",
+                    Style::default().fg(Color::DarkGray),
+                )),
+                Line::from(Span::styled("←  →", Style::default().fg(Color::DarkGray))),
+            ]),
+            ViewerState::Connecting => Text::from(vec![
+                Line::from(""),
+                Line::from(Span::styled(
+                    "Connecting...",
+                    Style::default().fg(Color::Yellow),
+                )),
+            ]),
+            ViewerState::Retrieving => Text::from(vec![
+                Line::from(""),
+                Line::from(Span::styled(
+                    "Retrieving",
+                    Style::default().fg(Color::Yellow),
+                )),
+                Line::from(format!("[{}]", self.current_url.as_deref().unwrap_or(""))),
+            ]),
             ViewerState::Connected => {
-                if let Some(content) = &self.page_content {
-                    content.lines().map(|l| Line::from(l.to_string())).collect()
+                if let Some(raw_content) = &self.page_content {
+                    let doc = parse_micron(raw_content);
+                    let config = RenderConfig {
+                        width: content_area.width,
+                        ..Default::default()
+                    };
+                    render_micron(&doc, &config)
                 } else {
-                    vec![Line::from("(empty page)")]
+                    Text::from(Line::from("(empty page)"))
                 }
             }
-            ViewerState::Failed => {
-                vec![
-                    Line::from(""),
-                    Line::from(Span::styled(
-                        "!",
-                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-                    )),
-                    Line::from(""),
-                    Line::from(Span::styled(
-                        "Request failed",
-                        Style::default().fg(Color::Red),
-                    )),
-                ]
-            }
-            ViewerState::TimedOut => {
-                vec![
-                    Line::from(""),
-                    Line::from(Span::styled(
-                        "!",
-                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-                    )),
-                    Line::from(""),
-                    Line::from(Span::styled(
-                        "Request timed out",
-                        Style::default().fg(Color::Red),
-                    )),
-                ]
-            }
+            ViewerState::Failed => Text::from(vec![
+                Line::from(""),
+                Line::from(Span::styled(
+                    "!",
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                )),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "Request failed",
+                    Style::default().fg(Color::Red),
+                )),
+            ]),
+            ViewerState::TimedOut => Text::from(vec![
+                Line::from(""),
+                Line::from(Span::styled(
+                    "!",
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                )),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "Request timed out",
+                    Style::default().fg(Color::Red),
+                )),
+            ]),
         };
 
-        let para = Paragraph::new(content).alignment(ratatui::layout::Alignment::Center);
+        let is_connected = self.viewer_state == ViewerState::Connected;
+        let para = if is_connected {
+            Paragraph::new(content)
+        } else {
+            Paragraph::new(content).alignment(ratatui::layout::Alignment::Center)
+        };
         para.render(content_area, buf);
 
         if let Some(msg) = &self.status_message {
