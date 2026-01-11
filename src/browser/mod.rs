@@ -1,160 +1,338 @@
-mod cache;
-mod history;
+use micron::{
+    parse as parse_micron, render as render_micron, Document, Element, Link, RenderConfig,
+};
+use ratatui::{
+    buffer::Buffer,
+    layout::Rect,
+    style::{Color, Modifier, Style},
+    text::{Line, Span, Text},
+    widgets::{Paragraph, Widget},
+};
 
-use cache::PageCache;
-use history::History;
-use micron::Document;
-use std::fmt;
-use std::path::Path;
-use thiserror::Error;
-
-pub use cache::CachedPage;
-
-#[derive(Error, Debug)]
-pub enum BrowserError {
-    #[error("invalid url: {0}")]
-    InvalidUrl(String),
-    #[error("cache error: {0}")]
-    Cache(#[from] cache::CacheError),
-    #[error("page not found: {0}")]
-    NotFound(String),
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrowserState {
+    Empty,
+    Connecting,
+    Retrieving,
+    Loaded,
+    Failed,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PageUrl {
-    pub dest_hash: [u8; 16],
-    pub path: String,
-}
-
-impl PageUrl {
-    pub fn parse(url: &str) -> Result<Self, BrowserError> {
-        let Some((hash_part, path)) = url.split_once(':') else {
-            return Err(BrowserError::InvalidUrl(
-                "missing ':' separator".to_string(),
-            ));
-        };
-
-        if hash_part.len() != 32 {
-            return Err(BrowserError::InvalidUrl(format!(
-                "destination hash must be 32 hex chars, got {}",
-                hash_part.len()
-            )));
-        }
-
-        let hash_bytes =
-            hex::decode(hash_part).map_err(|e| BrowserError::InvalidUrl(e.to_string()))?;
-
-        let mut dest_hash = [0u8; 16];
-        dest_hash.copy_from_slice(&hash_bytes);
-
-        let path = if path.is_empty() {
-            "/index.mu".to_string()
-        } else if !path.starts_with('/') {
-            format!("/{path}")
-        } else {
-            path.to_string()
-        };
-
-        Ok(Self { dest_hash, path })
-    }
-}
-
-impl fmt::Display for PageUrl {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}:{}", hex::encode(self.dest_hash), self.path)
-    }
+#[derive(Debug, Clone)]
+struct PageEntry {
+    url: String,
+    content: String,
+    scroll: u16,
 }
 
 pub struct Browser {
-    cache: PageCache,
-    history: History,
-    current: Option<PageUrl>,
+    state: BrowserState,
+    current: Option<PageEntry>,
+    back_stack: Vec<PageEntry>,
+    forward_stack: Vec<PageEntry>,
+    selected_link: usize,
+    status: Option<String>,
+    cached_doc: Option<Document>,
+    cached_links: Vec<LinkInfo>,
+}
+
+#[derive(Debug, Clone)]
+struct LinkInfo {
+    url: String,
+    line: usize,
+}
+
+pub enum NavigateRequest {
+    Fetch { url: String },
+    None,
 }
 
 impl Browser {
-    pub fn new(data_dir: &Path) -> Result<Self, BrowserError> {
-        let cache_dir = data_dir.join("cache");
-        Ok(Self {
-            cache: PageCache::new(&cache_dir)?,
-            history: History::new(),
+    pub fn new() -> Self {
+        Self {
+            state: BrowserState::Empty,
             current: None,
-        })
-    }
-
-    pub fn navigate(&mut self, url: &str) -> Result<NavigateResult, BrowserError> {
-        let parsed = PageUrl::parse(url)?;
-
-        if let Some(ref current) = self.current {
-            self.history.push(current.clone());
+            back_stack: Vec::new(),
+            forward_stack: Vec::new(),
+            selected_link: 0,
+            status: None,
+            cached_doc: None,
+            cached_links: Vec::new(),
         }
-
-        self.current = Some(parsed.clone());
-
-        if let Some(cached) = self.cache.get(&parsed)? {
-            return Ok(NavigateResult::Cached(cached));
-        }
-
-        Ok(NavigateResult::NeedsFetch(parsed))
     }
 
-    pub fn receive_page(&mut self, url: &PageUrl, content: &str) -> Result<Document, BrowserError> {
-        let doc = micron::parse(content);
-        self.cache.put(url, content)?;
-        Ok(doc)
+    pub fn state(&self) -> BrowserState {
+        self.state
     }
 
-    pub fn back(&mut self) -> Option<PageUrl> {
-        if let Some(current) = self.current.take() {
-            self.history.push_forward(current);
-        }
-        let prev = self.history.pop_back()?;
-        self.current = Some(prev.clone());
-        Some(prev)
+    pub fn current_url(&self) -> Option<&str> {
+        self.current.as_ref().map(|e| e.url.as_str())
     }
 
-    pub fn forward(&mut self) -> Option<PageUrl> {
-        if let Some(current) = self.current.take() {
-            self.history.push_back(current);
-        }
-        let next = self.history.pop_forward()?;
-        self.current = Some(next.clone());
-        Some(next)
-    }
-
-    pub fn current(&self) -> Option<&PageUrl> {
-        self.current.as_ref()
+    pub fn status(&self) -> Option<&str> {
+        self.status.as_deref()
     }
 
     pub fn can_go_back(&self) -> bool {
-        self.history.can_go_back()
+        !self.back_stack.is_empty()
     }
 
     pub fn can_go_forward(&self) -> bool {
-        self.history.can_go_forward()
+        !self.forward_stack.is_empty()
     }
 
-    pub fn clear_cache(&mut self) -> Result<(), BrowserError> {
-        self.cache.clear()?;
-        Ok(())
+    pub fn navigate(&mut self, url: String) -> NavigateRequest {
+        if let Some(current) = self.current.take() {
+            self.back_stack.push(current);
+        }
+        self.forward_stack.clear();
+        self.state = BrowserState::Connecting;
+        self.status = Some("Connecting...".into());
+        self.current = Some(PageEntry {
+            url: url.clone(),
+            content: String::new(),
+            scroll: 0,
+        });
+        self.cached_doc = None;
+        self.cached_links.clear();
+        self.selected_link = 0;
+        NavigateRequest::Fetch { url }
     }
 
-    pub fn cache_stats(&self) -> (usize, u64) {
-        self.cache.stats()
-    }
-}
-
-pub enum NavigateResult {
-    Cached(CachedPage),
-    NeedsFetch(PageUrl),
-}
-
-impl NavigateResult {
-    pub fn document(&self) -> Option<Document> {
-        match self {
-            NavigateResult::Cached(page) => Some(page.document()),
-            NavigateResult::NeedsFetch(_) => None,
+    pub fn set_retrieving(&mut self) {
+        if self.state == BrowserState::Connecting {
+            self.state = BrowserState::Retrieving;
+            self.status = Some("Retrieving...".into());
         }
     }
+
+    pub fn set_content(&mut self, url: &str, content: String) {
+        if self.current.as_ref().map(|e| e.url.as_str()) == Some(url) {
+            if let Some(ref mut entry) = self.current {
+                entry.content = content.clone();
+                entry.scroll = 0;
+            }
+            self.state = BrowserState::Loaded;
+            self.status = None;
+            self.rebuild_cache(&content);
+        }
+    }
+
+    pub fn set_failed(&mut self, url: &str, reason: String) {
+        if self.current.as_ref().map(|e| e.url.as_str()) == Some(url) {
+            self.state = BrowserState::Failed;
+            self.status = Some(reason);
+        }
+    }
+
+    fn rebuild_cache(&mut self, content: &str) {
+        let doc = parse_micron(content);
+        self.cached_links = extract_links(&doc);
+        self.cached_doc = Some(doc);
+        self.selected_link = 0;
+    }
+
+    pub fn go_back(&mut self) -> NavigateRequest {
+        let Some(prev) = self.back_stack.pop() else {
+            return NavigateRequest::None;
+        };
+        if let Some(current) = self.current.take() {
+            self.forward_stack.push(current);
+        }
+        let url = prev.url.clone();
+        let has_content = !prev.content.is_empty();
+        self.current = Some(prev);
+        if has_content {
+            if let Some(ref entry) = self.current {
+                self.rebuild_cache(&entry.content.clone());
+            }
+            self.state = BrowserState::Loaded;
+            self.status = None;
+            NavigateRequest::None
+        } else {
+            self.state = BrowserState::Connecting;
+            self.status = Some("Connecting...".into());
+            NavigateRequest::Fetch { url }
+        }
+    }
+
+    pub fn go_forward(&mut self) -> NavigateRequest {
+        let Some(next) = self.forward_stack.pop() else {
+            return NavigateRequest::None;
+        };
+        if let Some(current) = self.current.take() {
+            self.back_stack.push(current);
+        }
+        let url = next.url.clone();
+        let has_content = !next.content.is_empty();
+        self.current = Some(next);
+        if has_content {
+            if let Some(ref entry) = self.current {
+                self.rebuild_cache(&entry.content.clone());
+            }
+            self.state = BrowserState::Loaded;
+            self.status = None;
+            NavigateRequest::None
+        } else {
+            self.state = BrowserState::Connecting;
+            self.status = Some("Connecting...".into());
+            NavigateRequest::Fetch { url }
+        }
+    }
+
+    pub fn scroll_up(&mut self) {
+        if let Some(ref mut entry) = self.current {
+            entry.scroll = entry.scroll.saturating_sub(1);
+        }
+    }
+
+    pub fn scroll_down(&mut self) {
+        if let Some(ref mut entry) = self.current {
+            entry.scroll = entry.scroll.saturating_add(1);
+        }
+    }
+
+    pub fn scroll_page_up(&mut self, page_height: u16) {
+        if let Some(ref mut entry) = self.current {
+            entry.scroll = entry.scroll.saturating_sub(page_height.saturating_sub(2));
+        }
+    }
+
+    pub fn scroll_page_down(&mut self, page_height: u16) {
+        if let Some(ref mut entry) = self.current {
+            entry.scroll = entry.scroll.saturating_add(page_height.saturating_sub(2));
+        }
+    }
+
+    pub fn select_next_link(&mut self) {
+        if !self.cached_links.is_empty() {
+            self.selected_link = (self.selected_link + 1) % self.cached_links.len();
+            self.scroll_to_selected_link();
+        }
+    }
+
+    pub fn select_prev_link(&mut self) {
+        if !self.cached_links.is_empty() {
+            self.selected_link = self
+                .selected_link
+                .checked_sub(1)
+                .unwrap_or(self.cached_links.len() - 1);
+            self.scroll_to_selected_link();
+        }
+    }
+
+    fn scroll_to_selected_link(&mut self) {
+        if let Some(link) = self.cached_links.get(self.selected_link) {
+            if let Some(ref mut entry) = self.current {
+                entry.scroll = link.line.saturating_sub(2) as u16;
+            }
+        }
+    }
+
+    pub fn activate_link(&mut self) -> NavigateRequest {
+        let Some(link) = self.cached_links.get(self.selected_link) else {
+            return NavigateRequest::None;
+        };
+        let url = link.url.clone();
+        self.navigate(url)
+    }
+
+    pub fn selected_link_url(&self) -> Option<&str> {
+        self.cached_links
+            .get(self.selected_link)
+            .map(|l| l.url.as_str())
+    }
+
+    pub fn link_count(&self) -> usize {
+        self.cached_links.len()
+    }
+
+    pub fn render_content(&self, area: Rect, buf: &mut Buffer) {
+        let content = self.build_content(area.width);
+        let scroll = self.current.as_ref().map(|e| e.scroll).unwrap_or(0);
+
+        let is_loaded = self.state == BrowserState::Loaded;
+        let para = if is_loaded {
+            Paragraph::new(content).scroll((scroll, 0))
+        } else {
+            Paragraph::new(content).alignment(ratatui::layout::Alignment::Center)
+        };
+        para.render(area, buf);
+    }
+
+    fn build_content(&self, width: u16) -> Text<'static> {
+        match self.state {
+            BrowserState::Empty => Text::from(vec![
+                Line::from(""),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "No page loaded",
+                    Style::default().fg(Color::DarkGray),
+                )),
+            ]),
+            BrowserState::Connecting => Text::from(vec![
+                Line::from(""),
+                Line::from(Span::styled(
+                    "Connecting...",
+                    Style::default().fg(Color::Yellow),
+                )),
+            ]),
+            BrowserState::Retrieving => Text::from(vec![
+                Line::from(""),
+                Line::from(Span::styled(
+                    "Retrieving...",
+                    Style::default().fg(Color::Yellow),
+                )),
+            ]),
+            BrowserState::Loaded => {
+                if let Some(ref doc) = self.cached_doc {
+                    let config = RenderConfig {
+                        width,
+                        ..Default::default()
+                    };
+                    render_micron(doc, &config)
+                } else {
+                    Text::from(Line::from("(empty page)"))
+                }
+            }
+            BrowserState::Failed => {
+                let msg = self
+                    .status
+                    .clone()
+                    .unwrap_or_else(|| "Request failed".into());
+                Text::from(vec![
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        "!",
+                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                    )),
+                    Line::from(""),
+                    Line::from(Span::styled(msg, Style::default().fg(Color::Red))),
+                ])
+            }
+        }
+    }
+}
+
+impl Default for Browser {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn extract_links(doc: &Document) -> Vec<LinkInfo> {
+    let mut links = Vec::new();
+    for (line_idx, line) in doc.lines.iter().enumerate() {
+        for element in &line.elements {
+            if let Element::Link(Link { url, .. }) = element {
+                links.push(LinkInfo {
+                    url: url.clone(),
+                    line: line_idx,
+                });
+            }
+        }
+    }
+    links
 }
 
 #[cfg(test)]
@@ -162,35 +340,74 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_full_url() {
-        let url = "0123456789abcdef0123456789abcdef:/page.mu";
-        let parsed = PageUrl::parse(url).unwrap();
-        assert_eq!(parsed.path, "/page.mu");
+    fn initial_state() {
+        let browser = Browser::new();
+        assert_eq!(browser.state(), BrowserState::Empty);
+        assert!(browser.current_url().is_none());
+        assert!(!browser.can_go_back());
+        assert!(!browser.can_go_forward());
     }
 
     #[test]
-    fn parse_url_no_path() {
-        let url = "0123456789abcdef0123456789abcdef:";
-        let parsed = PageUrl::parse(url).unwrap();
-        assert_eq!(parsed.path, "/index.mu");
+    fn navigate_sets_connecting() {
+        let mut browser = Browser::new();
+        let req = browser.navigate("abc123:page.mu".into());
+        assert!(matches!(req, NavigateRequest::Fetch { .. }));
+        assert_eq!(browser.state(), BrowserState::Connecting);
+        assert_eq!(browser.current_url(), Some("abc123:page.mu"));
     }
 
     #[test]
-    fn parse_url_path_no_slash() {
-        let url = "0123456789abcdef0123456789abcdef:page.mu";
-        let parsed = PageUrl::parse(url).unwrap();
-        assert_eq!(parsed.path, "/page.mu");
+    fn set_content_transitions_to_loaded() {
+        let mut browser = Browser::new();
+        browser.navigate("abc123:page.mu".into());
+        browser.set_content("abc123:page.mu", "Hello".into());
+        assert_eq!(browser.state(), BrowserState::Loaded);
     }
 
     #[test]
-    fn parse_url_invalid_hash() {
-        let url = "short:/page";
-        assert!(PageUrl::parse(url).is_err());
+    fn back_forward_navigation() {
+        let mut browser = Browser::new();
+        browser.navigate("hash1:page1.mu".into());
+        browser.set_content("hash1:page1.mu", "Page 1".into());
+
+        browser.navigate("hash2:page2.mu".into());
+        browser.set_content("hash2:page2.mu", "Page 2".into());
+
+        assert!(browser.can_go_back());
+        assert!(!browser.can_go_forward());
+
+        browser.go_back();
+        assert_eq!(browser.current_url(), Some("hash1:page1.mu"));
+        assert!(browser.can_go_forward());
+
+        browser.go_forward();
+        assert_eq!(browser.current_url(), Some("hash2:page2.mu"));
     }
 
     #[test]
-    fn parse_url_no_separator() {
-        let url = "0123456789abcdef0123456789abcdef/page";
-        assert!(PageUrl::parse(url).is_err());
+    fn scroll() {
+        let mut browser = Browser::new();
+        browser.navigate("abc:page.mu".into());
+        browser.set_content("abc:page.mu", "content".into());
+
+        browser.scroll_down();
+        browser.scroll_down();
+        assert_eq!(browser.current.as_ref().unwrap().scroll, 2);
+
+        browser.scroll_up();
+        assert_eq!(browser.current.as_ref().unwrap().scroll, 1);
+    }
+
+    #[test]
+    fn extract_links_from_content() {
+        let mut browser = Browser::new();
+        browser.navigate("abc:page.mu".into());
+        browser.set_content(
+            "abc:page.mu",
+            "`[Link 1`http://a]\n`[Link 2`http://b]".into(),
+        );
+
+        assert_eq!(browser.link_count(), 2);
     }
 }
