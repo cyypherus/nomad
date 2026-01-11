@@ -28,7 +28,7 @@ pub struct NetworkView {
     focus: FocusArea,
 
     browser: Browser,
-    current_node_name: Option<String>,
+    current_node: Option<NodeInfo>,
 
     our_lxmf_addr: [u8; 16],
     our_name: String,
@@ -46,7 +46,7 @@ impl NetworkView {
             left_mode: LeftPanelMode::Nodes,
             focus: FocusArea::NodeList,
             browser: Browser::new(),
-            current_node_name: None,
+            current_node: None,
             our_lxmf_addr,
             our_name: "Anonymous Peer".to_string(),
             last_announce_secs: 0,
@@ -137,11 +137,59 @@ impl NetworkView {
 
         let path = "/page/index.mu".to_string();
         let url = format!("{}:{}", node.hash_hex(), path);
-        self.current_node_name = Some(node.name.clone());
+        self.current_node = Some(node.clone());
         self.browser.navigate(url);
         self.focus = FocusArea::BrowserView;
 
         Some((node, path))
+    }
+
+    pub fn navigate_to_link(&mut self, link_url: &str) -> Option<(NodeInfo, String)> {
+        if link_url.contains(':') {
+            let parts: Vec<&str> = link_url.splitn(2, ':').collect();
+            if parts.len() == 2 && parts[0].len() == 32 {
+                let hash_hex = parts[0];
+                let path = parts[1].to_string();
+
+                if let Ok(hash_bytes) = hex::decode(hash_hex) {
+                    if hash_bytes.len() == 16 {
+                        let mut hash = [0u8; 16];
+                        hash.copy_from_slice(&hash_bytes);
+
+                        if let Some(node) = self
+                            .nodes
+                            .iter()
+                            .find(|n| n.hash == hash)
+                            .cloned()
+                            .or_else(|| self.announces.iter().find(|n| n.hash == hash).cloned())
+                        {
+                            let url = format!("{}:{}", node.hash_hex(), path);
+                            self.current_node = Some(node.clone());
+                            self.browser.navigate(url);
+                            return Some((node, path));
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(ref node) = self.current_node {
+            let path = if link_url.starts_with('/') {
+                link_url.to_string()
+            } else {
+                format!("/{}", link_url)
+            };
+            let url = format!("{}:{}", node.hash_hex(), path);
+            let node = node.clone();
+            self.browser.navigate(url);
+            return Some((node, path));
+        }
+
+        None
+    }
+
+    pub fn current_node(&self) -> Option<&NodeInfo> {
+        self.current_node.as_ref()
     }
 
     pub fn set_page_content(&mut self, url: String, content: String) {
@@ -288,8 +336,9 @@ impl NetworkView {
 
     fn render_viewer(&mut self, area: Rect, buf: &mut Buffer) {
         let title = self
-            .current_node_name
-            .clone()
+            .current_node
+            .as_ref()
+            .map(|n| n.name.clone())
             .unwrap_or_else(|| "Remote Node".to_string());
 
         let border_style = if self.focus == FocusArea::BrowserView {

@@ -371,9 +371,12 @@ impl TuiApp {
                     }
                     MouseEventKind::Down(_) => {
                         if self.tab == Tab::Network {
-                            if let Some(_url) = self.network.browser_click(mouse.column, mouse.row)
-                            {
-                                // TODO: parse URL and fetch page
+                            if let Some(url) = self.network.browser_click(mouse.column, mouse.row) {
+                                if let Some((node, path)) = self.network.navigate_to_link(&url) {
+                                    let _ = self
+                                        .cmd_tx
+                                        .blocking_send(TuiCommand::FetchPage { node, path });
+                                }
                             }
                         }
                     }
@@ -427,8 +430,12 @@ impl TuiApp {
                     }
                 }
                 FocusArea::BrowserView => {
-                    if let Some(_url) = self.network.browser_activate() {
-                        // TODO: parse URL and fetch page
+                    if let Some(url) = self.network.browser_activate() {
+                        if let Some((node, path)) = self.network.navigate_to_link(&url) {
+                            let _ = self
+                                .cmd_tx
+                                .blocking_send(TuiCommand::FetchPage { node, path });
+                        }
                     }
                 }
             },
