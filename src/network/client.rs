@@ -94,7 +94,12 @@ impl NetworkClient {
         }
     }
 
-    pub async fn fetch_page(&self, node: &NodeInfo, path: &str) -> PageRequest {
+    pub async fn fetch_page(
+        &self,
+        node: &NodeInfo,
+        path: &str,
+        form_data: std::collections::HashMap<String, String>,
+    ) -> PageRequest {
         let (handle, request) = PageRequestHandle::new();
 
         let transport = self.transport.clone();
@@ -103,8 +108,15 @@ impl NetworkClient {
         let path = path.to_string();
 
         tokio::spawn(async move {
-            if let Err(e) =
-                fetch_page_inner(transport, known_destinations, &node, &path, handle).await
+            if let Err(e) = fetch_page_inner(
+                transport,
+                known_destinations,
+                &node,
+                &path,
+                form_data,
+                handle,
+            )
+            .await
             {
                 log::error!("fetch_page failed: {}", e);
             }
@@ -136,6 +148,7 @@ async fn fetch_page_inner(
     known_destinations: Arc<Mutex<HashMap<[u8; 16], DestinationDesc>>>,
     node: &NodeInfo,
     path: &str,
+    form_data: std::collections::HashMap<String, String>,
     handle: PageRequestHandle,
 ) -> Result<(), String> {
     let address_hash = AddressHash::from_bytes(&node.hash);
@@ -201,7 +214,7 @@ async fn fetch_page_inner(
     handle.set_status(PageStatus::LinkEstablished);
     handle.set_status(PageStatus::SendingRequest);
 
-    let request_result = send_page_request(&transport, &link, path).await;
+    let request_result = send_page_request(&transport, &link, path, &form_data).await;
     if let Err(e) = request_result {
         handle.fail(e);
         return Ok(());
@@ -262,7 +275,7 @@ async fn fetch_page_inner(
                             },
                         },
                         &link_id,
-                        &decrypt_fn,
+                        decrypt_fn,
                     );
 
                     match result {
@@ -405,6 +418,7 @@ async fn send_page_request(
     transport: &Arc<Mutex<Transport>>,
     link: &Arc<Mutex<Link>>,
     path: &str,
+    form_data: &std::collections::HashMap<String, String>,
 ) -> Result<(), String> {
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -413,12 +427,25 @@ async fn send_page_request(
 
     let path_hash = compute_path_hash(path);
 
-    let request_data: (f64, serde_bytes::ByteBuf, Option<()>) = (
-        timestamp,
-        serde_bytes::ByteBuf::from(path_hash.to_vec()),
-        None,
-    );
-    let packed = rmp_serde::to_vec(&request_data).map_err(|e| e.to_string())?;
+    let packed = if form_data.is_empty() {
+        let request_data: (f64, serde_bytes::ByteBuf, Option<()>) = (
+            timestamp,
+            serde_bytes::ByteBuf::from(path_hash.to_vec()),
+            None,
+        );
+        rmp_serde::to_vec(&request_data).map_err(|e| e.to_string())?
+    } else {
+        let request_data: (
+            f64,
+            serde_bytes::ByteBuf,
+            &std::collections::HashMap<String, String>,
+        ) = (
+            timestamp,
+            serde_bytes::ByteBuf::from(path_hash.to_vec()),
+            form_data,
+        );
+        rmp_serde::to_vec(&request_data).map_err(|e| e.to_string())?
+    };
 
     let link_guard = link.lock().await;
     let mut packet = link_guard

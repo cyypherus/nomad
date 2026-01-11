@@ -103,11 +103,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let _ = event_tx_clone.send(NetworkEvent::ConversationsUpdated(convos)).await;
                             }
                         }
-                        TuiCommand::FetchPage { node, path } => {
+                        TuiCommand::FetchPage { node, path, form_data } => {
                             let url = format!("{}:{}", node.hash_hex(), path);
                             let event_tx = event_tx_clone.clone();
 
-                            let request = network_client_clone.fetch_page(&node, &path).await;
+                            let request = network_client_clone.fetch_page(&node, &path, form_data).await;
                             let mut status_rx = request.status_receiver();
 
                             tokio::spawn(async move {

@@ -54,6 +54,7 @@ pub enum TuiCommand {
     FetchPage {
         node: NodeInfo,
         path: String,
+        form_data: std::collections::HashMap<String, String>,
     },
 }
 
@@ -326,6 +327,26 @@ impl TuiApp {
                 }
             }
 
+            if self.tab == Tab::Network && self.network.browser_is_editing() {
+                if let Event::Key(key) = event {
+                    match key.code {
+                        KeyCode::Char(c) => {
+                            self.network.browser_handle_char(c);
+                            return Ok(());
+                        }
+                        KeyCode::Backspace => {
+                            self.network.browser_handle_backspace();
+                            return Ok(());
+                        }
+                        KeyCode::Esc | KeyCode::Enter => {
+                            self.network.browser_cancel_edit();
+                            return Ok(());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
             if let Event::Key(key) = event {
                 let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
@@ -351,6 +372,11 @@ impl TuiApp {
                     (KeyCode::Char('l'), true) => self.handle_ctrl_l(),
                     (KeyCode::Char('a'), false) => self.handle_announce(),
                     (KeyCode::Char('n'), false) => self.handle_new(),
+                    (KeyCode::Char('d'), false) => {
+                        if self.tab == Tab::Network {
+                            self.network.browser_toggle_debug();
+                        }
+                    }
                     (KeyCode::Left, false) => self.handle_left(),
                     (KeyCode::Right, false) => self.handle_right(),
                     _ => {}
@@ -371,11 +397,17 @@ impl TuiApp {
                     }
                     MouseEventKind::Down(_) => {
                         if self.tab == Tab::Network {
-                            if let Some(url) = self.network.browser_click(mouse.column, mouse.row) {
-                                if let Some((node, path)) = self.network.navigate_to_link(&url) {
-                                    let _ = self
-                                        .cmd_tx
-                                        .blocking_send(TuiCommand::FetchPage { node, path });
+                            if let Some((url, form_data)) =
+                                self.network.browser_click(mouse.column, mouse.row)
+                            {
+                                if let Some((node, path, form_data)) =
+                                    self.network.navigate_to_link(&url, form_data)
+                                {
+                                    let _ = self.cmd_tx.blocking_send(TuiCommand::FetchPage {
+                                        node,
+                                        path,
+                                        form_data,
+                                    });
                                 }
                             }
                         }
@@ -424,17 +456,23 @@ impl TuiApp {
             Tab::Network => match self.network.focus() {
                 FocusArea::NodeList => {
                     if let Some((node, path)) = self.network.connect_selected() {
-                        let _ = self
-                            .cmd_tx
-                            .blocking_send(TuiCommand::FetchPage { node, path });
+                        let _ = self.cmd_tx.blocking_send(TuiCommand::FetchPage {
+                            node,
+                            path,
+                            form_data: std::collections::HashMap::new(),
+                        });
                     }
                 }
                 FocusArea::BrowserView => {
-                    if let Some(url) = self.network.browser_activate() {
-                        if let Some((node, path)) = self.network.navigate_to_link(&url) {
-                            let _ = self
-                                .cmd_tx
-                                .blocking_send(TuiCommand::FetchPage { node, path });
+                    if let Some((url, form_data)) = self.network.browser_activate() {
+                        if let Some((node, path, form_data)) =
+                            self.network.navigate_to_link(&url, form_data)
+                        {
+                            let _ = self.cmd_tx.blocking_send(TuiCommand::FetchPage {
+                                node,
+                                path,
+                                form_data,
+                            });
                         }
                     }
                 }

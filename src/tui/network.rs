@@ -5,8 +5,9 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph, Widget, Wrap},
+    widgets::{Block, Borders, List, ListItem, Paragraph, Widget},
 };
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FocusArea {
@@ -162,7 +163,11 @@ impl NetworkView {
         Some((node, path))
     }
 
-    pub fn navigate_to_link(&mut self, link_url: &str) -> Option<(NodeInfo, String)> {
+    pub fn navigate_to_link(
+        &mut self,
+        link_url: &str,
+        form_data: HashMap<String, String>,
+    ) -> Option<(NodeInfo, String, HashMap<String, String>)> {
         if let Some(rest) = link_url.strip_prefix(':') {
             if let Some(ref node) = self.current_node {
                 let path = if rest.starts_with('/') {
@@ -173,7 +178,7 @@ impl NetworkView {
                 let url = format!("{}:{}", node.hash_hex(), path);
                 let node = node.clone();
                 self.browser.navigate(url);
-                return Some((node, path));
+                return Some((node, path, form_data));
             }
             return None;
         }
@@ -206,7 +211,7 @@ impl NetworkView {
                             let url = format!("{}:{}", node.hash_hex(), path);
                             self.current_node = Some(node.clone());
                             self.browser.navigate(url);
-                            return Some((node, path));
+                            return Some((node, path, form_data));
                         } else {
                             log::warn!("Cannot navigate to unknown node: {}", hash_hex);
                             return None;
@@ -225,7 +230,7 @@ impl NetworkView {
             let url = format!("{}:{}", node.hash_hex(), path);
             let node = node.clone();
             self.browser.navigate(url);
-            return Some((node, path));
+            return Some((node, path, form_data));
         }
 
         None
@@ -248,10 +253,6 @@ impl NetworkView {
         self.browser.set_failed(&url, reason);
     }
 
-    pub fn set_retrieving(&mut self) {
-        self.browser.set_retrieving();
-    }
-
     pub fn browser(&self) -> &Browser {
         &self.browser
     }
@@ -260,9 +261,12 @@ impl NetworkView {
         &mut self.browser
     }
 
-    pub fn handle_browser_action(&mut self, action: BrowserAction) -> Option<String> {
+    pub fn handle_browser_action(
+        &mut self,
+        action: BrowserAction,
+    ) -> Option<(String, HashMap<String, String>)> {
         match action {
-            BrowserAction::Navigate { url } => Some(url),
+            BrowserAction::Navigate { url, form_data } => Some((url, form_data)),
             BrowserAction::None => None,
         }
     }
@@ -291,22 +295,22 @@ impl NetworkView {
         self.browser.select_prev();
     }
 
-    pub fn browser_activate(&mut self) -> Option<String> {
+    pub fn browser_activate(&mut self) -> Option<(String, HashMap<String, String>)> {
         let action = self.browser.activate();
         self.handle_browser_action(action)
     }
 
-    pub fn browser_go_back(&mut self) -> Option<String> {
+    pub fn browser_go_back(&mut self) -> Option<(String, HashMap<String, String>)> {
         let action = self.browser.go_back();
         self.handle_browser_action(action)
     }
 
-    pub fn browser_go_forward(&mut self) -> Option<String> {
+    pub fn browser_go_forward(&mut self) -> Option<(String, HashMap<String, String>)> {
         let action = self.browser.go_forward();
         self.handle_browser_action(action)
     }
 
-    pub fn browser_click(&mut self, x: u16, y: u16) -> Option<String> {
+    pub fn browser_click(&mut self, x: u16, y: u16) -> Option<(String, HashMap<String, String>)> {
         let action = self.browser.click(x, y, self.last_content_area);
         self.handle_browser_action(action)
     }
@@ -325,6 +329,10 @@ impl NetworkView {
 
     pub fn browser_is_editing(&self) -> bool {
         self.browser.is_editing()
+    }
+
+    pub fn browser_toggle_debug(&mut self) {
+        self.browser.toggle_debug_hitboxes();
     }
 
     fn render_left_panel(&mut self, area: Rect, buf: &mut Buffer) {
