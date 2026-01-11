@@ -29,6 +29,8 @@ pub enum NetworkEvent {
     AnnounceReceived {
         hash: [u8; 16],
         name: Option<String>,
+        public_key: [u8; 32],
+        verifying_key: [u8; 32],
     },
     AnnounceSent,
     Status(String),
@@ -58,6 +60,8 @@ pub enum TuiCommand {
     ConnectToNode {
         hash: [u8; 16],
         path: String,
+        public_key: Option<[u8; 32]>,
+        verifying_key: Option<[u8; 32]>,
     },
 }
 
@@ -119,8 +123,14 @@ impl TuiApp {
     fn poll_events(&mut self) {
         while let Ok(event) = self.event_rx.try_recv() {
             match event {
-                NetworkEvent::AnnounceReceived { hash, name } => {
-                    self.network.add_announce(hash, name);
+                NetworkEvent::AnnounceReceived {
+                    hash,
+                    name,
+                    public_key,
+                    verifying_key,
+                } => {
+                    self.network
+                        .add_announce(hash, name, public_key, verifying_key);
                     self.announces_received += 1;
                     self.set_status("Announce received");
                 }
@@ -381,10 +391,15 @@ impl TuiApp {
                 }
             }
             Tab::Network => {
-                if let Some((hash, path)) = self.network.connect_selected() {
-                    let _ = self
-                        .cmd_tx
-                        .blocking_send(TuiCommand::ConnectToNode { hash, path });
+                if let Some((hash, path, public_key, verifying_key)) =
+                    self.network.connect_selected()
+                {
+                    let _ = self.cmd_tx.blocking_send(TuiCommand::ConnectToNode {
+                        hash,
+                        path,
+                        public_key,
+                        verifying_key,
+                    });
                 }
             }
         }

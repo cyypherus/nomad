@@ -11,12 +11,16 @@ use std::path::Path;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SavedNode {
-    #[serde(with = "hex_bytes")]
+    #[serde(with = "hex_bytes_16")]
     pub hash: [u8; 16],
     pub name: String,
+    #[serde(with = "hex_bytes_32")]
+    pub public_key: [u8; 32],
+    #[serde(with = "hex_bytes_32")]
+    pub verifying_key: [u8; 32],
 }
 
-mod hex_bytes {
+mod hex_bytes_16 {
     use serde::{Deserialize, Deserializer, Serializer};
 
     pub fn serialize<S>(bytes: &[u8; 16], serializer: S) -> Result<S::Ok, S::Error>
@@ -35,6 +39,31 @@ mod hex_bytes {
         let mut arr = [0u8; 16];
         if bytes.len() != 16 {
             return Err(serde::de::Error::custom("expected 16 bytes"));
+        }
+        arr.copy_from_slice(&bytes);
+        Ok(arr)
+    }
+}
+
+mod hex_bytes_32 {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(bytes: &[u8; 32], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&hex::encode(bytes))
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<[u8; 32], D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        let bytes = hex::decode(&s).map_err(serde::de::Error::custom)?;
+        let mut arr = [0u8; 32];
+        if bytes.len() != 32 {
+            return Err(serde::de::Error::custom("expected 32 bytes"));
         }
         arr.copy_from_slice(&bytes);
         Ok(arr)
@@ -125,7 +154,13 @@ impl NetworkView {
         }
     }
 
-    pub fn add_announce(&mut self, hash: [u8; 16], name: Option<String>) {
+    pub fn add_announce(
+        &mut self,
+        hash: [u8; 16],
+        name: Option<String>,
+        public_key: [u8; 32],
+        verifying_key: [u8; 32],
+    ) {
         if let Some(existing) = self.announces.iter_mut().find(|a| a.hash == hash) {
             if name.is_some() {
                 existing.name = name.clone();
@@ -140,19 +175,17 @@ impl NetworkView {
         if let Some(node_name) = name {
             if let Some(existing) = self.saved_nodes.iter_mut().find(|n| n.hash == hash) {
                 existing.name = node_name;
+                existing.public_key = public_key;
+                existing.verifying_key = verifying_key;
             } else {
                 self.saved_nodes.push(SavedNode {
                     hash,
                     name: node_name,
+                    public_key,
+                    verifying_key,
                 });
             }
             self.save_nodes();
-        }
-    }
-
-    pub fn add_saved_node(&mut self, hash: [u8; 16], name: String) {
-        if !self.saved_nodes.iter().any(|n| n.hash == hash) {
-            self.saved_nodes.push(SavedNode { hash, name });
         }
     }
 
@@ -197,15 +230,22 @@ impl NetworkView {
         self.last_announce_secs = 0;
     }
 
-    pub fn connect_selected(&mut self) -> Option<([u8; 16], String)> {
-        let (hash, name) = match self.left_mode {
+    pub fn connect_selected(
+        &mut self,
+    ) -> Option<([u8; 16], String, Option<[u8; 32]>, Option<[u8; 32]>)> {
+        let (hash, name, public_key, verifying_key) = match self.left_mode {
             LeftPanelMode::Nodes => {
                 let node = self.saved_nodes.get(self.selected)?;
-                (node.hash, Some(node.name.clone()))
+                (
+                    node.hash,
+                    Some(node.name.clone()),
+                    Some(node.public_key),
+                    Some(node.verifying_key),
+                )
             }
             LeftPanelMode::Announces => {
                 let entry = self.announces.get(self.selected)?;
-                (entry.hash, entry.name.clone())
+                (entry.hash, entry.name.clone(), None, None)
             }
         };
 
@@ -216,7 +256,7 @@ impl NetworkView {
         self.status_message = Some("Connecting...".to_string());
         self.page_content = None;
 
-        Some((hash, path))
+        Some((hash, path, public_key, verifying_key))
     }
 
     pub fn set_page_content(&mut self, url: String, content: String) {

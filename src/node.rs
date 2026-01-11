@@ -65,6 +65,31 @@ impl NodeClient {
             .insert(node_hash_bytes, node_dest.desc);
     }
 
+    pub async fn register_saved_node(
+        &self,
+        hash: [u8; 16],
+        public_key: [u8; 32],
+        verifying_key: [u8; 32],
+    ) {
+        use reticulum::destination::{DestinationDesc, DestinationName};
+        use reticulum::hash::AddressHash;
+        use reticulum::identity::Identity;
+
+        let identity = Identity::new_from_slices(&public_key, &verifying_key);
+        let address_hash = AddressHash::from_bytes(&hash);
+        let name = DestinationName::new("nomadnetwork", "node");
+
+        let desc = DestinationDesc {
+            identity,
+            address_hash,
+            name,
+        };
+
+        log::debug!("Registered saved node: {}", hex::encode(hash));
+
+        self.known_nodes.lock().await.insert(hash, desc);
+    }
+
     pub async fn request_page(&self, node_hash: [u8; 16], path: String) -> Result<(), String> {
         let node_desc = {
             let nodes = self.known_nodes.lock().await;
@@ -397,7 +422,14 @@ fn parse_resource_content(data: &[u8]) -> Result<String, String> {
     let response: (serde_bytes::ByteBuf, serde_bytes::ByteBuf) = rmp_serde::from_slice(data)
         .map_err(|e| format!("Failed to parse resource response: {}", e))?;
 
-    String::from_utf8(response.1.to_vec()).map_err(|e| format!("Invalid UTF-8: {}", e))
+    let content =
+        String::from_utf8(response.1.to_vec()).map_err(|e| format!("Invalid UTF-8: {}", e))?;
+
+    if let Err(e) = std::fs::write(".nomad/last_page.mu", &content) {
+        log::warn!("Failed to save page to .nomad/last_page.mu: {}", e);
+    }
+
+    Ok(content)
 }
 
 #[cfg(test)]

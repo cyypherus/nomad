@@ -109,11 +109,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let _ = event_tx_clone.send(NetworkEvent::ConversationsUpdated(convos)).await;
                             }
                         }
-                        TuiCommand::ConnectToNode { hash, path } => {
-                            let _ = event_tx_clone.send(NetworkEvent::Status("Connecting...".to_string())).await;
-                            if let Err(e) = node_client_clone.request_page(hash, path.clone()).await {
+                        TuiCommand::ConnectToNode {
+                            hash,
+                            path,
+                            public_key,
+                            verifying_key,
+                        } => {
+                            if let (Some(pk), Some(vk)) = (public_key, verifying_key) {
+                                node_client_clone.register_saved_node(hash, pk, vk).await;
+                            }
+
+                            let address_hash =
+                                reticulum::hash::AddressHash::from_bytes(&hash);
+                            let transport = nomad_clone.lock().await.transport().clone();
+                            if !transport.lock().await.has_path(&address_hash).await {
+                                let _ = event_tx_clone
+                                    .send(NetworkEvent::Status(
+                                        "Requesting path...".to_string(),
+                                    ))
+                                    .await;
+                                transport.lock().await.request_path(&address_hash).await;
+                                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                            }
+
+                            let _ = event_tx_clone
+                                .send(NetworkEvent::Status("Connecting...".to_string()))
+                                .await;
+                            if let Err(e) =
+                                node_client_clone.request_page(hash, path.clone()).await
+                            {
                                 let url = format!("{}:{}", hex::encode(hash), path);
-                                let _ = event_tx_clone.send(NetworkEvent::ConnectionFailed { url, reason: e }).await;
+                                let _ = event_tx_clone
+                                    .send(NetworkEvent::ConnectionFailed { url, reason: e })
+                                    .await;
                             }
                         }
                     }
@@ -133,8 +161,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 node_client_clone.register_node(&dest).await;
                                 let mut hash_bytes = [0u8; 16];
                                 hash_bytes.copy_from_slice(hash.as_slice());
+                                let mut public_key = [0u8; 32];
+                                public_key.copy_from_slice(dest.identity.public_key_bytes());
+                                let mut verifying_key = [0u8; 32];
+                                verifying_key.copy_from_slice(dest.identity.verifying_key.as_bytes());
                                 drop(dest);
-                                let _ = event_tx_clone.send(NetworkEvent::AnnounceReceived { hash: hash_bytes, name }).await;
+                                let _ = event_tx_clone.send(NetworkEvent::AnnounceReceived { hash: hash_bytes, name, public_key, verifying_key }).await;
                             } else {
                                 log::debug!("LXMF announce from {}", hash);
                                 drop(dest);
