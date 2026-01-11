@@ -4,14 +4,24 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph, Widget},
+    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Widget},
 };
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SavedModalAction {
+    None,
+    Connect,
+    Delete,
+    Cancel,
+}
 
 pub struct SavedView {
     nodes: Vec<NodeInfo>,
     selected: usize,
     scroll_offset: usize,
     last_height: usize,
+    modal_open: bool,
+    modal_selected: usize,
 }
 
 impl Default for SavedView {
@@ -27,6 +37,8 @@ impl SavedView {
             selected: 0,
             scroll_offset: 0,
             last_height: 10,
+            modal_open: false,
+            modal_selected: 0,
         }
     }
 
@@ -48,15 +60,27 @@ impl SavedView {
         self.nodes.get(self.selected)
     }
 
+    pub fn is_modal_open(&self) -> bool {
+        self.modal_open
+    }
+
     pub fn select_next(&mut self) {
-        if !self.nodes.is_empty() {
+        if self.modal_open {
+            self.modal_selected = (self.modal_selected + 1) % 3;
+        } else if !self.nodes.is_empty() {
             self.selected = (self.selected + 1) % self.nodes.len();
             self.adjust_scroll();
         }
     }
 
     pub fn select_prev(&mut self) {
-        if !self.nodes.is_empty() {
+        if self.modal_open {
+            self.modal_selected = if self.modal_selected == 0 {
+                2
+            } else {
+                self.modal_selected - 1
+            };
+        } else if !self.nodes.is_empty() {
             self.selected = self.selected.checked_sub(1).unwrap_or(self.nodes.len() - 1);
             self.adjust_scroll();
         }
@@ -73,7 +97,41 @@ impl SavedView {
         }
     }
 
+    pub fn open_modal(&mut self) {
+        if !self.nodes.is_empty() {
+            self.modal_open = true;
+            self.modal_selected = 0;
+        }
+    }
+
+    pub fn open_delete_modal(&mut self) {
+        if !self.nodes.is_empty() {
+            self.modal_open = true;
+            self.modal_selected = 1;
+        }
+    }
+
+    pub fn close_modal(&mut self) {
+        self.modal_open = false;
+    }
+
+    pub fn modal_action(&self) -> SavedModalAction {
+        if !self.modal_open {
+            return SavedModalAction::None;
+        }
+        match self.modal_selected {
+            0 => SavedModalAction::Connect,
+            1 => SavedModalAction::Delete,
+            2 => SavedModalAction::Cancel,
+            _ => SavedModalAction::None,
+        }
+    }
+
     pub fn click(&mut self, _x: u16, y: u16, area: Rect) -> Option<usize> {
+        if self.modal_open {
+            return None;
+        }
+
         let inner_y = y.saturating_sub(area.y + 1);
         let idx = self.scroll_offset + inner_y as usize;
 
@@ -83,6 +141,48 @@ impl SavedView {
         } else {
             None
         }
+    }
+
+    pub fn click_modal(&mut self, x: u16, y: u16, area: Rect) -> SavedModalAction {
+        if !self.modal_open {
+            return SavedModalAction::None;
+        }
+
+        let modal_width = 50.min(area.width.saturating_sub(4));
+        let modal_height = 13.min(area.height.saturating_sub(4));
+        let modal_x = area.x + (area.width.saturating_sub(modal_width)) / 2;
+        let modal_y = area.y + (area.height.saturating_sub(modal_height)) / 2;
+
+        let inner_x = modal_x + 1;
+        let inner_y = modal_y + 1;
+        let inner_height = modal_height.saturating_sub(2);
+
+        let button_y = inner_y + inner_height.saturating_sub(2);
+        let inner_width = modal_width.saturating_sub(2);
+        let center_x = inner_x + inner_width / 2;
+
+        if y != button_y {
+            return SavedModalAction::None;
+        }
+
+        let connect_start = center_x.saturating_sub(22);
+        let connect_end = connect_start + 9;
+        let delete_start = center_x.saturating_sub(6);
+        let delete_end = delete_start + 8;
+        let cancel_start = center_x + 8;
+        let cancel_end = cancel_start + 9;
+
+        if x >= connect_start && x < connect_end {
+            return SavedModalAction::Connect;
+        }
+        if x >= delete_start && x < delete_end {
+            return SavedModalAction::Delete;
+        }
+        if x >= cancel_start && x < cancel_end {
+            return SavedModalAction::Cancel;
+        }
+
+        SavedModalAction::None
     }
 
     pub fn remove_selected(&mut self) -> Option<NodeInfo> {
@@ -230,6 +330,120 @@ impl SavedView {
 
         Paragraph::new(content).render(inner, buf);
     }
+
+    fn render_modal(&self, area: Rect, buf: &mut Buffer) {
+        if !self.modal_open {
+            return;
+        }
+
+        let Some(node) = self.selected_node() else {
+            return;
+        };
+
+        let modal_width = 50.min(area.width.saturating_sub(4));
+        let modal_height = 13.min(area.height.saturating_sub(4));
+        let modal_x = area.x + (area.width.saturating_sub(modal_width)) / 2;
+        let modal_y = area.y + (area.height.saturating_sub(modal_height)) / 2;
+
+        let modal_area = Rect::new(modal_x, modal_y, modal_width, modal_height);
+
+        Clear.render(modal_area, buf);
+
+        let block = Block::default()
+            .title(Line::from(vec![Span::styled(
+                " Node ",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            )]))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Magenta));
+
+        let inner = block.inner(modal_area);
+        block.render(modal_area, buf);
+
+        let hash_hex = node.hash_hex();
+        let content = vec![
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("  Name: ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    &node.name,
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]),
+            Line::from(""),
+            Line::from(vec![Span::styled(
+                "  Hash: ",
+                Style::default().fg(Color::DarkGray),
+            )]),
+            Line::from(vec![Span::styled(
+                format!("  {}", &hash_hex[..16]),
+                Style::default().fg(Color::Cyan),
+            )]),
+            Line::from(vec![Span::styled(
+                format!("  {}", &hash_hex[16..]),
+                Style::default().fg(Color::Cyan),
+            )]),
+            Line::from(""),
+        ];
+
+        Paragraph::new(content).render(
+            Rect::new(
+                inner.x,
+                inner.y,
+                inner.width,
+                inner.height.saturating_sub(2),
+            ),
+            buf,
+        );
+
+        let button_y = inner.y + inner.height.saturating_sub(2);
+        let center_x = inner.x + inner.width / 2;
+
+        let connect_style = if self.modal_selected == 0 {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Magenta)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Magenta)
+        };
+
+        let delete_style = if self.modal_selected == 1 {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Red)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Red)
+        };
+
+        let cancel_style = if self.modal_selected == 2 {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+
+        buf.set_string(
+            center_x.saturating_sub(22),
+            button_y,
+            " Connect ",
+            connect_style,
+        );
+        buf.set_string(
+            center_x.saturating_sub(6),
+            button_y,
+            " Delete ",
+            delete_style,
+        );
+        buf.set_string(center_x + 8, button_y, " Cancel ", cancel_style);
+    }
 }
 
 impl Widget for &mut SavedView {
@@ -242,5 +456,6 @@ impl Widget for &mut SavedView {
 
         self.render_list(chunks[0], buf);
         self.render_detail(chunks[1], buf);
+        self.render_modal(area, buf);
     }
 }

@@ -26,7 +26,7 @@ use tokio::sync::mpsc;
 use super::browser_view::BrowserView;
 use super::discovery::{DiscoveryView, ModalAction};
 use super::mynode::MyNodeView;
-use super::saved::SavedView;
+use super::saved::{SavedModalAction, SavedView};
 use super::status_bar::StatusBar;
 use super::tabs::{Tab, TabBar};
 
@@ -362,6 +362,20 @@ impl TuiApp {
             return;
         }
 
+        if self.saved.is_modal_open() {
+            match code {
+                KeyCode::Esc => self.saved.close_modal(),
+                KeyCode::Tab | KeyCode::Down | KeyCode::Char('j') => self.saved.select_next(),
+                KeyCode::BackTab | KeyCode::Up | KeyCode::Char('k') => self.saved.select_prev(),
+                KeyCode::Enter => {
+                    let action = self.saved.modal_action();
+                    self.handle_saved_modal_action(action);
+                }
+                _ => {}
+            }
+            return;
+        }
+
         match code {
             KeyCode::Char('q') => self.running = false,
             KeyCode::Tab => {
@@ -436,6 +450,14 @@ impl TuiApp {
                             return;
                         }
 
+                        if self.saved.is_modal_open() {
+                            let modal_action = self.saved.click_modal(x, y, self.last_main_area);
+                            if modal_action != SavedModalAction::None {
+                                self.handle_saved_modal_action(modal_action);
+                            }
+                            return;
+                        }
+
                         match self.tab {
                             Tab::Discovery => {
                                 if self.discovery.click(x, y, self.last_main_area).is_some() {
@@ -444,7 +466,7 @@ impl TuiApp {
                             }
                             Tab::Saved => {
                                 if self.saved.click(x, y, self.last_main_area).is_some() {
-                                    self.connect_to_saved();
+                                    self.saved.open_modal();
                                 }
                             }
                             Tab::MyNode => {
@@ -490,7 +512,7 @@ impl TuiApp {
                 self.discovery.open_modal();
             }
             Tab::Saved => {
-                self.connect_to_saved();
+                self.saved.open_modal();
             }
             Tab::MyNode => {
                 self.send_announce();
@@ -519,9 +541,24 @@ impl TuiApp {
         }
     }
 
-    fn connect_to_saved(&mut self) {
-        if let Some(node) = self.saved.selected_node().cloned() {
-            self.connect_to_node(&node);
+    fn handle_saved_modal_action(&mut self, action: SavedModalAction) {
+        match action {
+            SavedModalAction::Connect => {
+                if let Some(node) = self.saved.selected_node().cloned() {
+                    self.saved.close_modal();
+                    self.connect_to_node(&node);
+                }
+            }
+            SavedModalAction::Delete => {
+                if let Some(removed) = self.saved.remove_selected() {
+                    self.saved.close_modal();
+                    self.status_bar
+                        .set_status(format!("Removed {}", removed.name));
+                }
+            }
+            SavedModalAction::Cancel | SavedModalAction::None => {
+                self.saved.close_modal();
+            }
         }
     }
 
@@ -540,7 +577,11 @@ impl TuiApp {
             .set_status(format!("Connecting to {}...", node.name));
     }
 
-    fn navigate_to_link(&mut self, url: &str, form_data: std::collections::HashMap<String, String>) {
+    fn navigate_to_link(
+        &mut self,
+        url: &str,
+        form_data: std::collections::HashMap<String, String>,
+    ) {
         let all_nodes: Vec<NodeInfo> = self
             .discovery
             .nodes()
@@ -550,9 +591,11 @@ impl TuiApp {
             .collect();
 
         if let Some((node, path)) = self.browser.navigate_to_link(url, &all_nodes) {
-            let _ = self
-                .cmd_tx
-                .blocking_send(TuiCommand::FetchPage { node, path, form_data });
+            let _ = self.cmd_tx.blocking_send(TuiCommand::FetchPage {
+                node,
+                path,
+                form_data,
+            });
         }
     }
 
@@ -569,10 +612,7 @@ impl TuiApp {
 
     fn handle_delete(&mut self) {
         if self.tab == Tab::Saved {
-            if let Some(removed) = self.saved.remove_selected() {
-                self.status_bar
-                    .set_status(format!("Removed {}", removed.name));
-            }
+            self.saved.open_delete_modal();
         }
     }
 }

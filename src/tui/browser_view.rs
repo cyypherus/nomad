@@ -102,7 +102,11 @@ impl BrowserView {
         }
     }
 
-    pub fn click(&mut self, x: u16, y: u16) -> Option<(String, std::collections::HashMap<String, String>)> {
+    pub fn click(
+        &mut self,
+        x: u16,
+        y: u16,
+    ) -> Option<(String, std::collections::HashMap<String, String>)> {
         match self.browser.click(x, y, self.last_content_area) {
             BrowserAction::Navigate { url, form_data } => Some((url, form_data)),
             BrowserAction::None => None,
