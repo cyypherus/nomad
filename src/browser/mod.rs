@@ -1,6 +1,6 @@
 use micron::{
-    parse as parse_micron, render as render_micron, Document, Element, Field, FieldKind, Link,
-    RenderConfig,
+    parse as parse_micron, render as render_micron, Document, Element, Field, FieldKind, FormState,
+    Link, RenderConfig,
 };
 use ratatui::{
     buffer::Buffer,
@@ -405,8 +405,8 @@ impl Browser {
         self.radio_states.get(name).map(|s| s.as_str())
     }
 
-    pub fn form_data(&self) -> FormData {
-        FormData {
+    pub fn form_state(&self) -> FormState {
+        FormState {
             fields: self.field_values.clone(),
             checkboxes: self.checkbox_states.clone(),
             radios: self.radio_states.clone(),
@@ -452,8 +452,14 @@ impl Browser {
             ]),
             BrowserState::Loaded => {
                 if let Some(ref doc) = self.cached_doc {
+                    let form_state = FormState {
+                        fields: self.field_values.clone(),
+                        checkboxes: self.checkbox_states.clone(),
+                        radios: self.radio_states.clone(),
+                    };
                     let config = RenderConfig {
                         width,
+                        form_state: Some(&form_state),
                         ..Default::default()
                     };
                     render_micron(doc, &config)
@@ -484,13 +490,6 @@ impl Default for Browser {
     fn default() -> Self {
         Self::new()
     }
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct FormData {
-    pub fields: HashMap<String, String>,
-    pub checkboxes: HashMap<String, bool>,
-    pub radios: HashMap<String, String>,
 }
 
 fn extract_interactives(doc: &Document) -> Vec<Interactive> {
