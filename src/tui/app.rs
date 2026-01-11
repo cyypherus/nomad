@@ -434,7 +434,13 @@ impl TuiApp {
 
                 match self.mode {
                     AppMode::Browser => {
-                        if let Some(link) = self.browser.click(x, y) {
+                        use super::browser_view::NavAction;
+                        if let Some(nav) = self.browser.click_nav(x, y) {
+                            match nav {
+                                NavAction::Back => { self.browser.go_back(); }
+                                NavAction::Forward => { self.browser.go_forward(); }
+                            }
+                        } else if let Some(link) = self.browser.click(x, y) {
                             self.navigate_to_link(link);
                         }
                     }

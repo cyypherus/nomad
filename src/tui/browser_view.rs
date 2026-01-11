@@ -8,10 +8,18 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Widget},
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NavAction {
+    Back,
+    Forward,
+}
+
 pub struct BrowserView {
     browser: Browser<RatatuiRenderer>,
     current_node: Option<NodeInfo>,
     last_content_area: Rect,
+    last_back_btn_area: Rect,
+    last_fwd_btn_area: Rect,
 }
 
 impl Default for BrowserView {
@@ -26,6 +34,8 @@ impl BrowserView {
             browser: Browser::new(RatatuiRenderer),
             current_node: None,
             last_content_area: Rect::default(),
+            last_back_btn_area: Rect::default(),
+            last_fwd_btn_area: Rect::default(),
         }
     }
 
@@ -71,6 +81,20 @@ impl BrowserView {
 
     pub fn go_back(&mut self) -> bool {
         self.browser.back()
+    }
+
+    pub fn go_forward(&mut self) -> bool {
+        self.browser.forward()
+    }
+
+    pub fn click_nav(&mut self, x: u16, y: u16) -> Option<NavAction> {
+        if self.last_back_btn_area.intersects(Rect::new(x, y, 1, 1)) && self.browser.can_go_back() {
+            return Some(NavAction::Back);
+        }
+        if self.last_fwd_btn_area.intersects(Rect::new(x, y, 1, 1)) && self.browser.can_go_forward() {
+            return Some(NavAction::Forward);
+        }
+        None
     }
 
     pub fn click(&mut self, x: u16, y: u16) -> Option<Link> {
@@ -181,20 +205,32 @@ impl Widget for &mut BrowserView {
             return;
         }
 
-        let url_line = if let Some(url) = self.browser.url() {
-            Line::from(vec![
-                Span::styled("\u{2192} ", Style::default().fg(Color::Cyan)),
-                Span::styled(url.to_string(), Style::default().fg(Color::DarkGray)),
-            ])
+        let back_style = if self.browser.can_go_back() {
+            Style::default().fg(Color::Cyan)
         } else {
-            Line::from(Span::styled(
-                "No page loaded",
-                Style::default().fg(Color::DarkGray),
-            ))
+            Style::default().fg(Color::DarkGray)
+        };
+        let fwd_style = if self.browser.can_go_forward() {
+            Style::default().fg(Color::Cyan)
+        } else {
+            Style::default().fg(Color::DarkGray)
         };
 
+        let nav_bar = Line::from(vec![
+            Span::styled("\u{25c0} ", back_style),
+            Span::styled("\u{25b6} ", fwd_style),
+            if let Some(url) = self.browser.url() {
+                Span::styled(url.to_string(), Style::default().fg(Color::DarkGray))
+            } else {
+                Span::styled("No page loaded", Style::default().fg(Color::DarkGray))
+            },
+        ]);
+
+        self.last_back_btn_area = Rect::new(inner.x, inner.y, 2, 1);
+        self.last_fwd_btn_area = Rect::new(inner.x + 2, inner.y, 2, 1);
+
         let url_area = Rect::new(inner.x, inner.y, inner.width, 1);
-        Paragraph::new(url_line).render(url_area, buf);
+        Paragraph::new(nav_bar).render(url_area, buf);
 
         let divider_area = Rect::new(inner.x, inner.y + 1, inner.width, 1);
         let divider = "\u{2500}".repeat(inner.width as usize);
