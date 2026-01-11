@@ -3,7 +3,7 @@ mod browser;
 mod config;
 pub mod conversation;
 mod identity;
-mod node;
+mod network;
 mod packet_audit;
 mod tui;
 
@@ -13,7 +13,7 @@ use tokio::sync::mpsc;
 use tokio::sync::Mutex;
 
 use app::NomadApp;
-use node::{is_node_announce, NodeClient, PageRequestResult};
+use network::{NetworkClient, NodeRegistry, PageStatus};
 use simplelog::{Config as LogConfig, LevelFilter, WriteLogger};
 use tui::{NetworkEvent, TuiApp, TuiCommand};
 
@@ -31,25 +31,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (event_tx, event_rx) = mpsc::channel::<NetworkEvent>(100);
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<TuiCommand>(100);
     let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
-    let (page_result_tx, mut page_result_rx) = mpsc::channel::<PageRequestResult>(100);
 
     let transport = nomad.lock().await.transport().clone();
-    let node_client = Arc::new(NodeClient::new(transport, page_result_tx));
+    let registry = NodeRegistry::new(".nomad/nodes.toml");
+    let initial_nodes: Vec<_> = registry.all().into_iter().cloned().collect();
+    let network_client = Arc::new(NetworkClient::new(transport.clone(), registry));
 
     let nomad_clone = nomad.clone();
-    let node_client_clone = node_client.clone();
+    let network_client_clone = network_client.clone();
     let event_tx_clone = event_tx.clone();
-    let transport_for_audit = nomad.lock().await.transport().clone();
+
     let network_task = tokio::spawn(async move {
         let app = nomad_clone.lock().await;
         let mut announce_rx = app.announce_events().await;
         let mut data_rx = app.received_data_events().await;
         let testnet = app.testnet_address().to_string();
-        let our_dest = app.dest_hash();
         drop(app);
 
-        let mut raw_packet_rx = transport_for_audit.lock().await.iface_rx();
-        let our_dest_hash = reticulum::hash::AddressHash::new_from_slice(&our_dest);
+        let mut node_announces = network_client_clone.node_announces();
 
         log::info!("Network task started, connected to {}", testnet);
         let _ = event_tx_clone
@@ -63,16 +62,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     break;
                 }
                 Some(cmd) = cmd_rx.recv() => {
-                    log::info!("Received command: {:?}", cmd);
-                    let _ = event_tx_clone.send(NetworkEvent::Status(format!("Got cmd: {:?}", cmd))).await;
                     match cmd {
                         TuiCommand::Announce => {
-                            log::info!("Processing Announce command");
                             let _ = event_tx_clone.send(NetworkEvent::Status("Announcing...".to_string())).await;
                             let app = nomad_clone.lock().await;
                             app.announce().await;
-                            log::info!("Announce sent");
-                            let _ = event_tx_clone.send(NetworkEvent::Status("Announced".to_string())).await;
                             let _ = event_tx_clone.send(NetworkEvent::AnnounceSent).await;
                         }
                         TuiCommand::LoadConversations => {
@@ -109,128 +103,78 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let _ = event_tx_clone.send(NetworkEvent::ConversationsUpdated(convos)).await;
                             }
                         }
-                        TuiCommand::ConnectToNode {
-                            hash,
-                            path,
-                            public_key,
-                            verifying_key,
-                        } => {
-                            if let (Some(pk), Some(vk)) = (public_key, verifying_key) {
-                                node_client_clone.register_saved_node(hash, pk, vk).await;
-                            }
+                        TuiCommand::FetchPage { node, path } => {
+                            let url = format!("{}:{}", node.hash_hex(), path);
+                            let event_tx = event_tx_clone.clone();
 
-                            let address_hash =
-                                reticulum::hash::AddressHash::from_bytes(&hash);
-                            let transport = nomad_clone.lock().await.transport().clone();
-                            if !transport.lock().await.has_path(&address_hash).await {
-                                let _ = event_tx_clone
-                                    .send(NetworkEvent::Status(
-                                        "Requesting path...".to_string(),
-                                    ))
-                                    .await;
-                                transport.lock().await.request_path(&address_hash).await;
-                                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                            }
+                            let request = network_client_clone.fetch_page(&node, &path).await;
+                            let mut status_rx = request.status_receiver();
 
-                            let _ = event_tx_clone
-                                .send(NetworkEvent::Status("Connecting...".to_string()))
-                                .await;
-                            if let Err(e) =
-                                node_client_clone.request_page(hash, path.clone()).await
-                            {
-                                let url = format!("{}:{}", hex::encode(hash), path);
-                                let _ = event_tx_clone
-                                    .send(NetworkEvent::ConnectionFailed { url, reason: e })
-                                    .await;
-                            }
+                            tokio::spawn(async move {
+                                loop {
+                                    let status = status_rx.borrow().clone();
+                                    let msg = match &status {
+                                        PageStatus::RequestingPath => "Requesting path...".into(),
+                                        PageStatus::WaitingForAnnounce => "Waiting for announce...".into(),
+                                        PageStatus::PathFound { hops } => format!("Path found ({} hops)", hops),
+                                        PageStatus::Connecting => "Connecting...".into(),
+                                        PageStatus::LinkEstablished => "Link established".into(),
+                                        PageStatus::SendingRequest => "Sending request...".into(),
+                                        PageStatus::AwaitingResponse => "Awaiting response...".into(),
+                                        PageStatus::Retrieving { parts_received, total_parts } => {
+                                            format!("Retrieving... {}/{}", parts_received, total_parts)
+                                        }
+                                        PageStatus::Complete => {
+                                            break;
+                                        }
+                                        PageStatus::Cancelled => {
+                                            let _ = event_tx.send(NetworkEvent::Status("Cancelled".into())).await;
+                                            return;
+                                        }
+                                        PageStatus::Failed(reason) => {
+                                            let _ = event_tx.send(NetworkEvent::PageFailed { url: url.clone(), reason: reason.clone() }).await;
+                                            return;
+                                        }
+                                    };
+                                    let _ = event_tx.send(NetworkEvent::Status(msg)).await;
+
+                                    if status_rx.changed().await.is_err() {
+                                        break;
+                                    }
+                                }
+
+                                match request.result().await {
+                                    Ok(content) => {
+                                        let _ = event_tx.send(NetworkEvent::PageReceived { url, content }).await;
+                                    }
+                                    Err(e) => {
+                                        let _ = event_tx.send(NetworkEvent::PageFailed { url, reason: e }).await;
+                                    }
+                                }
+                            });
                         }
                     }
                 }
                 result = announce_rx.recv() => {
-                    match &result {
-                        Ok(event) => {
-                            let dest = event.destination.lock().await;
-                            let hash = dest.desc.address_hash;
-                            let name_hash = dest.desc.name.as_name_hash_slice();
-                            let is_node = is_node_announce(&dest);
-                            log::debug!("Announce {} name_hash={} is_node={}", hash, hex::encode(name_hash), is_node);
-
-                            if is_node {
-                                let name = parse_display_name(event.app_data.as_slice());
-                                log::info!("Node announce from {} name={:?}", hash, name);
-                                node_client_clone.register_node(&dest).await;
-                                let mut hash_bytes = [0u8; 16];
-                                hash_bytes.copy_from_slice(hash.as_slice());
-                                let mut public_key = [0u8; 32];
-                                public_key.copy_from_slice(dest.identity.public_key_bytes());
-                                let mut verifying_key = [0u8; 32];
-                                verifying_key.copy_from_slice(dest.identity.verifying_key.as_bytes());
-                                drop(dest);
-                                let _ = event_tx_clone.send(NetworkEvent::AnnounceReceived { hash: hash_bytes, name, public_key, verifying_key }).await;
-                            } else {
-                                log::debug!("LXMF announce from {}", hash);
-                                drop(dest);
-                                let mut app = nomad_clone.lock().await;
-                                app.handle_announce(event).await;
-                            }
-                        }
-                        Err(e) => {
-                            log::warn!("Announce channel error: {:?}", e);
-                        }
+                    if let Ok(event) = result {
+                        let dest = event.destination.lock().await;
+                        network_client_clone.handle_announce(&dest, event.app_data.as_slice()).await;
+                        drop(dest);
+                    }
+                }
+                result = node_announces.recv() => {
+                    if let Ok(node) = result {
+                        log::info!("Node announce: {} ({})", node.name, node.hash_hex());
+                        let _ = event_tx_clone.send(NetworkEvent::NodeAnnounce(node)).await;
                     }
                 }
                 result = data_rx.recv() => {
-                    match &result {
-                        Ok(data) => {
-                            log::debug!("Data received, {} bytes", data.data.len());
-                            let mut app = nomad_clone.lock().await;
-                            if let Some(msg) = app.handle_received_message(data) {
-                                let peer = msg.source_hash;
-                                log::info!("Message received from {}", hex::encode(peer));
-                                let _ = event_tx_clone.send(NetworkEvent::MessageReceived(peer)).await;
-                            }
-                        }
-                        Err(e) => {
-                            log::warn!("Data channel error: {:?}", e);
-                        }
-                    }
-                }
-                Some(result) = page_result_rx.recv() => {
-                    match result {
-                        PageRequestResult::Success { url, content } => {
-                            let _ = event_tx_clone.send(NetworkEvent::PageReceived { url, content }).await;
-                        }
-                        PageRequestResult::Failed { url, reason } => {
-                            let _ = event_tx_clone.send(NetworkEvent::ConnectionFailed { url, reason }).await;
-                        }
-                        PageRequestResult::TimedOut { url } => {
-                            let _ = event_tx_clone.send(NetworkEvent::ConnectionFailed {
-                                url,
-                                reason: "Request timed out".to_string(),
-                            }).await;
-                        }
-                    }
-                }
-                result = raw_packet_rx.recv() => {
-                    if let Ok(msg) = result {
-                        let packet = &msg.packet;
-                        let ptype = packet.header.packet_type;
-                        let dtype = packet.header.destination_type;
-                        let ctx = packet.context;
-                        let dest = &packet.destination;
-
-                        let is_for_our_identity = dest.as_slice() == our_dest_hash.as_slice();
-                        let is_link_packet = dtype == reticulum::packet::DestinationType::Link;
-
-                        let handled = match ptype {
-                            reticulum::packet::PacketType::Announce => true,
-                            reticulum::packet::PacketType::LinkRequest => is_for_our_identity,
-                            reticulum::packet::PacketType::Proof => true,
-                            reticulum::packet::PacketType::Data => is_for_our_identity || is_link_packet,
-                        };
-
-                        if !handled {
-                            log::debug!("[AUDIT] Packet not for us: type={:?} dest={}", ptype, dest);
+                    if let Ok(data) = result {
+                        let mut app = nomad_clone.lock().await;
+                        if let Some(msg) = app.handle_received_message(&data) {
+                            let peer = msg.source_hash;
+                            log::info!("Message received from {}", hex::encode(peer));
+                            let _ = event_tx_clone.send(NetworkEvent::MessageReceived(peer)).await;
                         }
                     }
                 }
@@ -239,7 +183,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let tui_result = tokio::task::spawn_blocking(move || {
-        let mut tui = TuiApp::new(dest_hash, event_rx, cmd_tx)?;
+        let mut tui = TuiApp::new(dest_hash, initial_nodes, event_rx, cmd_tx)?;
         tui.run()
     })
     .await?;
@@ -249,30 +193,4 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tui_result?;
     Ok(())
-}
-
-fn parse_display_name(app_data: &[u8]) -> Option<String> {
-    if app_data.is_empty() {
-        return None;
-    }
-
-    // Version 0.5.0+ announce format: msgpack array where first element is display name
-    if (app_data[0] >= 0x90 && app_data[0] <= 0x9f) || app_data[0] == 0xdc {
-        // Try parsing as array of optional values
-        if let Ok(data) = rmp_serde::from_slice::<Vec<Option<serde_bytes::ByteBuf>>>(app_data) {
-            if let Some(Some(name_bytes)) = data.first() {
-                return String::from_utf8(name_bytes.to_vec()).ok();
-            }
-        }
-        // Try parsing as array of strings
-        if let Ok(data) = rmp_serde::from_slice::<Vec<Option<String>>>(app_data) {
-            if let Some(name) = data.first() {
-                return name.clone();
-            }
-        }
-        return None;
-    }
-
-    // Original announce format: raw UTF-8 string
-    String::from_utf8(app_data.to_vec()).ok()
 }
