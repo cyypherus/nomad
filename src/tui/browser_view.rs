@@ -217,8 +217,10 @@ impl Widget for &mut BrowserView {
         };
 
         let nav_bar = Line::from(vec![
-            Span::styled("\u{25c0} ", back_style),
-            Span::styled("\u{25b6} ", fwd_style),
+            Span::styled("[\u{25c0}]", back_style),
+            Span::raw(" "),
+            Span::styled("[\u{25b6}]", fwd_style),
+            Span::raw("  "),
             if let Some(url) = self.browser.url() {
                 Span::styled(url.to_string(), Style::default().fg(Color::DarkGray))
             } else {
@@ -226,8 +228,8 @@ impl Widget for &mut BrowserView {
             },
         ]);
 
-        self.last_back_btn_area = Rect::new(inner.x, inner.y, 2, 1);
-        self.last_fwd_btn_area = Rect::new(inner.x + 2, inner.y, 2, 1);
+        self.last_back_btn_area = Rect::new(inner.x, inner.y, 3, 1);
+        self.last_fwd_btn_area = Rect::new(inner.x + 4, inner.y, 3, 1);
 
         let url_area = Rect::new(inner.x, inner.y, inner.width, 1);
         Paragraph::new(nav_bar).render(url_area, buf);
