@@ -40,6 +40,8 @@ pub struct Browser {
     radio_states: HashMap<String, String>,
     editing_field: Option<usize>,
     render_width: u16,
+    content_height: u16,
+    viewport_height: u16,
     debug_hitboxes: bool,
 }
 
@@ -73,6 +75,8 @@ impl Browser {
             radio_states: HashMap::new(),
             editing_field: None,
             render_width: 80,
+            content_height: 0,
+            viewport_height: 0,
             debug_hitboxes: false,
         }
     }
@@ -272,7 +276,10 @@ impl Browser {
 
     pub fn scroll_down(&mut self) {
         if let Some(ref mut entry) = self.current {
-            entry.scroll = entry.scroll.saturating_add(1);
+            let max_scroll = self.content_height.saturating_sub(self.viewport_height);
+            if entry.scroll < max_scroll {
+                entry.scroll = entry.scroll.saturating_add(1);
+            }
         }
     }
 
@@ -284,7 +291,9 @@ impl Browser {
 
     pub fn scroll_page_down(&mut self, page_height: u16) {
         if let Some(ref mut entry) = self.current {
-            entry.scroll = entry.scroll.saturating_add(page_height.saturating_sub(2));
+            let max_scroll = self.content_height.saturating_sub(self.viewport_height);
+            let new_scroll = entry.scroll.saturating_add(page_height.saturating_sub(2));
+            entry.scroll = new_scroll.min(max_scroll);
         }
     }
 
@@ -510,6 +519,8 @@ impl Browser {
     }
 
     pub fn render_content(&mut self, area: Rect, buf: &mut Buffer) {
+        self.viewport_height = area.height;
+
         if self.current.is_some() {
             if area.width != self.render_width {
                 if let Some(ref entry) = self.current {
@@ -519,6 +530,13 @@ impl Browser {
             }
 
             let content = self.build_page_content(area.width);
+            self.content_height = content.lines.len() as u16;
+
+            if let Some(ref mut entry) = self.current {
+                let max_scroll = self.content_height.saturating_sub(self.viewport_height);
+                entry.scroll = entry.scroll.min(max_scroll);
+            }
+
             let scroll = self.current.as_ref().map(|e| e.scroll).unwrap_or(0);
             Paragraph::new(content)
                 .scroll((scroll, 0))
@@ -725,7 +743,13 @@ mod tests {
     fn scroll() {
         let mut browser = Browser::new();
         browser.navigate("abc:page.mu".into());
-        browser.set_content("abc:page.mu", "content".into(), 80);
+        browser.set_content(
+            "abc:page.mu",
+            "line1\nline2\nline3\nline4\nline5".into(),
+            80,
+        );
+        browser.viewport_height = 2;
+        browser.content_height = 5;
 
         browser.scroll_down();
         browser.scroll_down();
@@ -733,6 +757,14 @@ mod tests {
 
         browser.scroll_up();
         assert_eq!(browser.current.as_ref().unwrap().scroll, 1);
+
+        // Test that we can't scroll past the end
+        browser.scroll_down();
+        browser.scroll_down();
+        browser.scroll_down();
+        browser.scroll_down();
+        // Max scroll is content_height - viewport_height = 5 - 2 = 3
+        assert_eq!(browser.current.as_ref().unwrap().scroll, 3);
     }
 
     #[test]
