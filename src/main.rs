@@ -113,18 +113,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             tokio::spawn(async move {
                                 loop {
                                     let status = status_rx.borrow().clone();
-                                    match &status {
-                                        PageStatus::RequestingPath => {
-                                            let _ = event_tx.send(NetworkEvent::Status("Requesting path...".into())).await;
-                                        }
-                                        PageStatus::WaitingForAnnounce => {
-                                            let _ = event_tx.send(NetworkEvent::Status("Waiting for announce...".into())).await;
-                                        }
-                                        PageStatus::Connecting => {
-                                            let _ = event_tx.send(NetworkEvent::Status("Connecting...".into())).await;
-                                        }
-                                        PageStatus::Retrieving { progress } => {
-                                            let _ = event_tx.send(NetworkEvent::Status(format!("Retrieving... {:.0}%", progress * 100.0))).await;
+                                    let msg = match &status {
+                                        PageStatus::RequestingPath => "Requesting path...".into(),
+                                        PageStatus::WaitingForAnnounce => "Waiting for announce...".into(),
+                                        PageStatus::PathFound { hops } => format!("Path found ({} hops)", hops),
+                                        PageStatus::Connecting => "Connecting...".into(),
+                                        PageStatus::LinkEstablished => "Link established".into(),
+                                        PageStatus::SendingRequest => "Sending request...".into(),
+                                        PageStatus::AwaitingResponse => "Awaiting response...".into(),
+                                        PageStatus::Retrieving { parts_received, total_parts } => {
+                                            format!("Retrieving... {}/{}", parts_received, total_parts)
                                         }
                                         PageStatus::Complete => {
                                             break;
@@ -133,7 +131,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             let _ = event_tx.send(NetworkEvent::PageFailed { url: url.clone(), reason: reason.clone() }).await;
                                             return;
                                         }
-                                    }
+                                    };
+                                    let _ = event_tx.send(NetworkEvent::Status(msg)).await;
 
                                     if status_rx.changed().await.is_err() {
                                         break;

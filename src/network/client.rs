@@ -145,6 +145,10 @@ async fn fetch_page_inner(
         }
     }
 
+    if let Some(hops) = transport.lock().await.path_hops(&address_hash).await {
+        handle.set_status(PageStatus::PathFound { hops });
+    }
+
     let dest_desc = {
         let known = known_destinations.lock().await;
         known.get(&node.hash).cloned()
@@ -173,7 +177,8 @@ async fn fetch_page_inner(
         }
     }
 
-    handle.set_status(PageStatus::Retrieving { progress: 0.0 });
+    handle.set_status(PageStatus::LinkEstablished);
+    handle.set_status(PageStatus::SendingRequest);
 
     let request_result = send_page_request(&transport, &link, path).await;
     if let Err(e) = request_result {
@@ -181,7 +186,11 @@ async fn fetch_page_inner(
         return Ok(());
     }
 
+    handle.set_status(PageStatus::AwaitingResponse);
+
     let mut resource_manager = ResourceManager::new();
+    let mut parts_received: u32 = 0;
+    let mut total_parts: u32 = 0;
 
     loop {
         let event = timeout(Duration::from_secs(60), link_events.recv()).await;
@@ -235,6 +244,13 @@ async fn fetch_page_inner(
 
                     match result {
                         ResourceHandleResult::RequestParts(hash) => {
+                            if let Some(info) = resource_manager.resource_info(&hash) {
+                                total_parts = info.total_parts;
+                                handle.set_status(PageStatus::Retrieving {
+                                    parts_received: 0,
+                                    total_parts,
+                                });
+                            }
                             if let Some(request_packet) =
                                 resource_manager.create_request_packet(&hash, &link_id, encrypt_fn)
                             {
@@ -265,7 +281,15 @@ async fn fetch_page_inner(
                                 return Ok(());
                             }
                         }
-                        ResourceHandleResult::None => {}
+                        ResourceHandleResult::None => {
+                            parts_received += 1;
+                            if total_parts > 0 {
+                                handle.set_status(PageStatus::Retrieving {
+                                    parts_received,
+                                    total_parts,
+                                });
+                            }
+                        }
                     }
                 }
                 LinkEvent::Closed => {

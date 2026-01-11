@@ -4,8 +4,17 @@ use tokio::sync::{oneshot, watch};
 pub enum PageStatus {
     RequestingPath,
     WaitingForAnnounce,
+    PathFound {
+        hops: u8,
+    },
     Connecting,
-    Retrieving { progress: f32 },
+    LinkEstablished,
+    SendingRequest,
+    AwaitingResponse,
+    Retrieving {
+        parts_received: u32,
+        total_parts: u32,
+    },
     Complete,
     Failed(String),
 }
