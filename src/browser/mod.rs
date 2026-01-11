@@ -40,6 +40,8 @@ pub struct Browser {
 struct LinkInfo {
     url: String,
     line: usize,
+    col_start: usize,
+    col_end: usize,
 }
 
 pub enum NavigateRequest {
@@ -247,6 +249,35 @@ impl Browser {
         self.cached_links.len()
     }
 
+    pub fn click(&mut self, x: u16, y: u16, content_area: Rect) -> NavigateRequest {
+        if self.state != BrowserState::Loaded {
+            return NavigateRequest::None;
+        }
+
+        let scroll = self.current.as_ref().map(|e| e.scroll).unwrap_or(0);
+
+        if x < content_area.x || x >= content_area.x + content_area.width {
+            return NavigateRequest::None;
+        }
+        if y < content_area.y || y >= content_area.y + content_area.height {
+            return NavigateRequest::None;
+        }
+
+        let rel_y = y - content_area.y;
+        let rel_x = x - content_area.x;
+        let doc_line = (rel_y + scroll) as usize;
+        let doc_col = rel_x as usize;
+
+        for (idx, link) in self.cached_links.iter().enumerate() {
+            if link.line == doc_line && doc_col >= link.col_start && doc_col < link.col_end {
+                self.selected_link = idx;
+                return self.activate_link();
+            }
+        }
+
+        NavigateRequest::None
+    }
+
     pub fn render_content(&self, area: Rect, buf: &mut Buffer) {
         let content = self.build_content(area.width);
         let scroll = self.current.as_ref().map(|e| e.scroll).unwrap_or(0);
@@ -323,12 +354,26 @@ impl Default for Browser {
 fn extract_links(doc: &Document) -> Vec<LinkInfo> {
     let mut links = Vec::new();
     for (line_idx, line) in doc.lines.iter().enumerate() {
+        let mut col = 0usize;
         for element in &line.elements {
-            if let Element::Link(Link { url, .. }) = element {
-                links.push(LinkInfo {
-                    url: url.clone(),
-                    line: line_idx,
-                });
+            match element {
+                Element::Link(Link { url, label, .. }) => {
+                    let len = label.chars().count();
+                    links.push(LinkInfo {
+                        url: url.clone(),
+                        line: line_idx,
+                        col_start: col,
+                        col_end: col + len,
+                    });
+                    col += len;
+                }
+                Element::Text(t) => {
+                    col += t.text.chars().count();
+                }
+                Element::Field(f) => {
+                    col += f.width.unwrap_or(24) as usize;
+                }
+                Element::Partial(_) => {}
             }
         }
     }
@@ -409,5 +454,31 @@ mod tests {
         );
 
         assert_eq!(browser.link_count(), 2);
+    }
+
+    #[test]
+    fn click_on_link() {
+        let mut browser = Browser::new();
+        browser.navigate("abc:page.mu".into());
+        browser.set_content("abc:page.mu", "`[Click Me`http://target]".into());
+
+        assert_eq!(browser.link_count(), 1);
+
+        let area = Rect::new(0, 0, 80, 24);
+        let req = browser.click(3, 0, area);
+
+        assert!(matches!(req, NavigateRequest::Fetch { url } if url == "http://target"));
+    }
+
+    #[test]
+    fn click_outside_link() {
+        let mut browser = Browser::new();
+        browser.navigate("abc:page.mu".into());
+        browser.set_content("abc:page.mu", "Some text `[Link`http://x]".into());
+
+        let area = Rect::new(0, 0, 80, 24);
+        let req = browser.click(0, 0, area);
+
+        assert!(matches!(req, NavigateRequest::None));
     }
 }
