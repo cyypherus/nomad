@@ -47,7 +47,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let testnet = app.testnet_address().to_string();
         let our_dest = app.dest_hash();
         drop(app);
-        
+
         let mut raw_packet_rx = transport_for_audit.lock().await.iface_rx();
         let our_dest_hash = reticulum::hash::AddressHash::new_from_slice(&our_dest);
 
@@ -183,27 +183,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if let Ok(msg) = result {
                         let packet = &msg.packet;
                         let ptype = packet.header.packet_type;
+                        let dtype = packet.header.destination_type;
                         let ctx = packet.context;
                         let dest = &packet.destination;
-                        
-                        let is_for_us = dest.as_slice() == our_dest_hash.as_slice();
-                        
+
+                        let is_for_our_identity = dest.as_slice() == our_dest_hash.as_slice();
+                        let is_link_packet = dtype == reticulum::packet::DestinationType::Link;
+
                         let handled = match ptype {
                             reticulum::packet::PacketType::Announce => true,
-                            reticulum::packet::PacketType::LinkRequest => is_for_us,
-                            reticulum::packet::PacketType::Proof => {
-                                if ctx == reticulum::packet::PacketContext::LinkRequestProof {
-                                    log::info!("[AUDIT] LINK_PROOF received! dest={} - checking if this matches our pending link", dest);
-                                }
-                                true
-                            },
-                            reticulum::packet::PacketType::Data => is_for_us,
+                            reticulum::packet::PacketType::LinkRequest => is_for_our_identity,
+                            reticulum::packet::PacketType::Proof => true,
+                            reticulum::packet::PacketType::Data => is_for_our_identity || is_link_packet,
                         };
-                        
+
                         if !handled {
                             log::debug!("[AUDIT] Packet not for us: type={:?} dest={}", ptype, dest);
-                        } else {
-                            log::info!("[AUDIT] Packet: type={:?} ctx={:?} dest={} for_us={}", ptype, ctx, dest, is_for_us);
                         }
                     }
                 }

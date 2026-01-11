@@ -1,25 +1,25 @@
-use reticulum::packet::{Packet, PacketType, PacketContext};
 use reticulum::hash::AddressHash;
+use reticulum::packet::{Packet, PacketContext, PacketType};
 
 pub fn log_inbound_packet(packet: &Packet, our_destinations: &[AddressHash]) {
     let dest = &packet.destination;
     let ptype = &packet.header.packet_type;
     let ctx = &packet.context;
-    
+
     let is_for_us = our_destinations.iter().any(|d| d == dest);
-    
+
     let category = match ptype {
         PacketType::Announce => "ANNOUNCE",
-        PacketType::LinkRequest => "LINK_REQUEST", 
+        PacketType::LinkRequest => "LINK_REQUEST",
         PacketType::Proof => match ctx {
             PacketContext::LinkRequestProof => "LINK_PROOF",
             _ => "PROOF_OTHER",
         },
         PacketType::Data => "DATA",
     };
-    
+
     let target = if is_for_us { "FOR_US" } else { "NOT_FOR_US" };
-    
+
     log::info!(
         "[PACKET_IN] {} {} dest={} ctx={:?} hash={}",
         category,
@@ -34,14 +34,14 @@ pub fn log_outbound_packet(packet: &Packet, reason: &str) {
     let dest = &packet.destination;
     let ptype = &packet.header.packet_type;
     let ctx = &packet.context;
-    
+
     let category = match ptype {
         PacketType::Announce => "ANNOUNCE",
         PacketType::LinkRequest => "LINK_REQUEST",
         PacketType::Proof => "PROOF",
         PacketType::Data => "DATA",
     };
-    
+
     log::info!(
         "[PACKET_OUT] {} dest={} ctx={:?} reason={} hash={}",
         category,

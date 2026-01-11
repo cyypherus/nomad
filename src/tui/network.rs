@@ -5,11 +5,45 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, Paragraph, Widget, Wrap},
 };
+use serde::{Deserialize, Serialize};
+use std::fs;
+use std::path::Path;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SavedNode {
+    #[serde(with = "hex_bytes")]
     pub hash: [u8; 16],
     pub name: String,
+}
+
+mod hex_bytes {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(bytes: &[u8; 16], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&hex::encode(bytes))
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<[u8; 16], D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        let bytes = hex::decode(&s).map_err(serde::de::Error::custom)?;
+        let mut arr = [0u8; 16];
+        if bytes.len() != 16 {
+            return Err(serde::de::Error::custom("expected 16 bytes"));
+        }
+        arr.copy_from_slice(&bytes);
+        Ok(arr)
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct NodesFile {
+    nodes: Vec<SavedNode>,
 }
 
 #[derive(Debug, Clone)]
@@ -54,8 +88,9 @@ pub struct NetworkView {
 
 impl NetworkView {
     pub fn new(our_lxmf_addr: [u8; 16]) -> Self {
+        let saved_nodes = Self::load_nodes().unwrap_or_default();
         Self {
-            saved_nodes: Vec::new(),
+            saved_nodes,
             announces: Vec::new(),
             selected: 0,
             left_mode: LeftPanelMode::Nodes,
@@ -70,13 +105,48 @@ impl NetworkView {
         }
     }
 
+    fn nodes_path() -> std::path::PathBuf {
+        Path::new(".nomad").join("nodes.toml")
+    }
+
+    fn load_nodes() -> Option<Vec<SavedNode>> {
+        let path = Self::nodes_path();
+        let contents = fs::read_to_string(&path).ok()?;
+        let file: NodesFile = toml::from_str(&contents).ok()?;
+        Some(file.nodes)
+    }
+
+    fn save_nodes(&self) {
+        let file = NodesFile {
+            nodes: self.saved_nodes.clone(),
+        };
+        if let Ok(contents) = toml::to_string_pretty(&file) {
+            let _ = fs::write(Self::nodes_path(), contents);
+        }
+    }
+
     pub fn add_announce(&mut self, hash: [u8; 16], name: Option<String>) {
         if let Some(existing) = self.announces.iter_mut().find(|a| a.hash == hash) {
             if name.is_some() {
-                existing.name = name;
+                existing.name = name.clone();
             }
         } else {
-            self.announces.push(AnnounceEntry { hash, name });
+            self.announces.push(AnnounceEntry {
+                hash,
+                name: name.clone(),
+            });
+        }
+
+        if let Some(node_name) = name {
+            if let Some(existing) = self.saved_nodes.iter_mut().find(|n| n.hash == hash) {
+                existing.name = node_name;
+            } else {
+                self.saved_nodes.push(SavedNode {
+                    hash,
+                    name: node_name,
+                });
+            }
+            self.save_nodes();
         }
     }
 

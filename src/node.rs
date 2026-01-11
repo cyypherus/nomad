@@ -1,7 +1,8 @@
-use reticulum::destination::link::LinkEvent;
+use reticulum::destination::link::{Link, LinkEvent};
 use reticulum::destination::{DestinationDesc, DestinationName, SingleOutputDestination};
 use reticulum::hash::AddressHash;
 use reticulum::packet::PacketContext;
+use reticulum::resource::{ResourceHandleResult, ResourceManager};
 use reticulum::transport::Transport;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -9,7 +10,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{broadcast, mpsc, Mutex};
 
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone)]
 pub enum PageRequestResult {
@@ -20,6 +21,7 @@ pub enum PageRequestResult {
 
 struct PendingRequest {
     url: String,
+    resource_manager: ResourceManager,
 }
 
 pub fn node_aspect_name() -> DestinationName {
@@ -84,10 +86,13 @@ impl NodeClient {
 
         log::debug!("NodeClient: link {} created, subscribed to events", link_id);
 
-        self.pending
-            .lock()
-            .await
-            .insert(link_id, PendingRequest { url: url.clone() });
+        self.pending.lock().await.insert(
+            link_id,
+            PendingRequest {
+                url: url.clone(),
+                resource_manager: ResourceManager::new(),
+            },
+        );
 
         let pending = self.pending.clone();
         let transport = self.transport.clone();
@@ -125,8 +130,8 @@ impl NodeClient {
                                         }
                                     }
                                     LinkEvent::Data(payload) => {
-                                        let mut pending = pending.lock().await;
-                                        if let Some(req) = pending.remove(&link_id) {
+                                        let mut pending_guard = pending.lock().await;
+                                        if let Some(req) = pending_guard.remove(&link_id) {
                                             match parse_page_response(payload.as_slice()) {
                                                 Ok(content) => {
                                                     let _ = result_tx.send(PageRequestResult::Success {
@@ -144,9 +149,62 @@ impl NodeClient {
                                         }
                                         break;
                                     }
+                                    LinkEvent::ResourcePacket { context, data } => {
+                                        log::debug!("NodeClient: resource packet {:?} {}B", context, data.len());
+                                        let result = handle_resource_packet(
+                                            &pending,
+                                            &link_id,
+                                            context,
+                                            &data,
+                                            &link,
+                                            &transport,
+                                        ).await;
+
+                                        if let Some(page_data) = result {
+                                            let mut pending_guard = pending.lock().await;
+                                            if let Some(req) = pending_guard.remove(&link_id) {
+                                                match parse_resource_content(&page_data) {
+                                                    Ok(content) => {
+                                                        let _ = result_tx.send(PageRequestResult::Success {
+                                                            url: req.url,
+                                                            content,
+                                                        }).await;
+                                                    }
+                                                    Err(e) => {
+                                                        let _ = result_tx.send(PageRequestResult::Failed {
+                                                            url: req.url,
+                                                            reason: e,
+                                                        }).await;
+                                                    }
+                                                }
+                                            }
+                                            break;
+                                        }
+                                    }
+                                    LinkEvent::Response { request_id: _, data } => {
+                                        log::debug!("NodeClient: direct response {}B", data.len());
+                                        let mut pending_guard = pending.lock().await;
+                                        if let Some(req) = pending_guard.remove(&link_id) {
+                                            match String::from_utf8(data) {
+                                                Ok(content) => {
+                                                    let _ = result_tx.send(PageRequestResult::Success {
+                                                        url: req.url,
+                                                        content,
+                                                    }).await;
+                                                }
+                                                Err(e) => {
+                                                    let _ = result_tx.send(PageRequestResult::Failed {
+                                                        url: req.url,
+                                                        reason: format!("Invalid UTF-8: {}", e),
+                                                    }).await;
+                                                }
+                                            }
+                                        }
+                                        break;
+                                    }
                                     LinkEvent::Closed => {
-                                        let mut pending = pending.lock().await;
-                                        if let Some(req) = pending.remove(&link_id) {
+                                        let mut pending_guard = pending.lock().await;
+                                        if let Some(req) = pending_guard.remove(&link_id) {
                                             let _ = result_tx.send(PageRequestResult::Failed {
                                                 url: req.url,
                                                 reason: "Link closed".to_string(),
@@ -214,15 +272,143 @@ fn parse_page_response(data: &[u8]) -> Result<String, String> {
     String::from_utf8(content_bytes).map_err(|e| format!("Invalid UTF-8: {}", e))
 }
 
+async fn handle_resource_packet(
+    pending: &Arc<Mutex<HashMap<AddressHash, PendingRequest>>>,
+    link_id: &AddressHash,
+    context: PacketContext,
+    data: &[u8],
+    link: &Arc<Mutex<Link>>,
+    transport: &Arc<Mutex<Transport>>,
+) -> Option<Vec<u8>> {
+    let mut pending_guard = pending.lock().await;
+    let req = pending_guard.get_mut(link_id)?;
+
+    let link_guard = link.lock().await;
+    let decrypt_fn = |ciphertext: &[u8]| -> Option<Vec<u8>> {
+        let mut buf = vec![0u8; ciphertext.len() + 64];
+        link_guard
+            .decrypt(ciphertext, &mut buf)
+            .ok()
+            .map(|s| s.to_vec())
+    };
+
+    let result = req.resource_manager.handle_packet(
+        &reticulum::packet::Packet {
+            header: Default::default(),
+            ifac: None,
+            destination: *link_id,
+            transport: None,
+            context,
+            data: {
+                let mut buf = reticulum::packet::PacketDataBuffer::new();
+                buf.safe_write(data);
+                buf
+            },
+        },
+        link_id,
+        &decrypt_fn,
+    );
+
+    match result {
+        ResourceHandleResult::RequestParts(hash) => {
+            log::debug!("NodeClient: requesting resource parts for {}", hash);
+            let encrypt_fn = |plaintext: &[u8]| -> Option<Vec<u8>> {
+                let mut buf = vec![0u8; plaintext.len() + 64];
+                link_guard
+                    .encrypt(plaintext, &mut buf)
+                    .ok()
+                    .map(|s| s.to_vec())
+            };
+
+            // Capture plaintext during encryption for self-test
+            let captured_plaintext: std::cell::RefCell<Option<Vec<u8>>> =
+                std::cell::RefCell::new(None);
+            let encrypt_fn_with_capture = |plaintext: &[u8]| -> Option<Vec<u8>> {
+                *captured_plaintext.borrow_mut() = Some(plaintext.to_vec());
+                encrypt_fn(plaintext)
+            };
+
+            if let Some(request_packet) =
+                req.resource_manager
+                    .create_request_packet(&hash, link_id, encrypt_fn_with_capture)
+            {
+                log::debug!(
+                    "NodeClient: sending resource request ctx={:?} data_len={}",
+                    request_packet.context,
+                    request_packet.data.len()
+                );
+
+                // Self-test: verify we can decrypt what we encrypted and it matches original
+                if let Some(original_plaintext) = captured_plaintext.borrow().clone() {
+                    let encrypted_data = request_packet.data.as_slice();
+                    let decrypt_result = decrypt_fn(encrypted_data);
+                    match decrypt_result {
+                        Some(decrypted) => {
+                            if decrypted == original_plaintext {
+                                log::debug!(
+                                    "NodeClient: self-test PASSED - round-trip {} bytes OK",
+                                    original_plaintext.len()
+                                );
+                            } else {
+                                log::error!(
+                                    "NodeClient: self-test MISMATCH - original {} bytes, decrypted {} bytes",
+                                    original_plaintext.len(),
+                                    decrypted.len()
+                                );
+                                log::error!("  original:  {}", hex::encode(&original_plaintext));
+                                log::error!("  decrypted: {}", hex::encode(&decrypted));
+                            }
+                        }
+                        None => {
+                            log::error!(
+                                "NodeClient: self-test FAILED - could not decrypt our own encrypted data ({} bytes)",
+                                encrypted_data.len()
+                            );
+                        }
+                    }
+                }
+
+                drop(link_guard);
+                drop(pending_guard);
+                transport.lock().await.send_packet(request_packet).await;
+            }
+            None
+        }
+        ResourceHandleResult::Assemble(hash) => {
+            log::info!("NodeClient: assembling resource {}", hash);
+            if let Some((data, proof_packet)) = req
+                .resource_manager
+                .assemble_and_prove(&hash, link_id, decrypt_fn)
+            {
+                drop(link_guard);
+                drop(pending_guard);
+                transport.lock().await.send_packet(proof_packet).await;
+                Some(data)
+            } else {
+                log::error!("NodeClient: failed to assemble resource {}", hash);
+                None
+            }
+        }
+        ResourceHandleResult::None => None,
+    }
+}
+
+fn parse_resource_content(data: &[u8]) -> Result<String, String> {
+    let response: (serde_bytes::ByteBuf, serde_bytes::ByteBuf) = rmp_serde::from_slice(data)
+        .map_err(|e| format!("Failed to parse resource response: {}", e))?;
+
+    String::from_utf8(response.1.to_vec()).map_err(|e| format!("Invalid UTF-8: {}", e))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_page_request_format() {
         let path = "/page/index.mu";
         let path_hash = compute_path_hash(path);
-        
+
         let timestamp: f64 = 1736541605.123;
         let request_data: (f64, serde_bytes::ByteBuf, Option<()>) = (
             timestamp,
@@ -230,13 +416,17 @@ mod tests {
             None,
         );
         let packed = rmp_serde::to_vec(&request_data).unwrap();
-        
+
         println!("Path: {}", path);
         println!("Path hash: {}", hex::encode(path_hash));
         println!("Packed length: {}", packed.len());
         println!("Packed hex: {}", hex::encode(&packed));
-        
+
         // Python produces 29 bytes for this structure
-        assert!(packed.len() <= 30, "Packed data too large: {} bytes", packed.len());
+        assert!(
+            packed.len() <= 30,
+            "Packed data too large: {} bytes",
+            packed.len()
+        );
     }
 }
