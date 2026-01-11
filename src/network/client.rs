@@ -405,16 +405,19 @@ fn parse_display_name(app_data: &[u8]) -> Option<String> {
         return None;
     }
 
-    let parsed: Result<(Option<String>,), _> = rmp_serde::from_slice(app_data);
-    if let Ok((Some(name),)) = parsed {
-        return Some(name);
+    if (app_data[0] >= 0x90 && app_data[0] <= 0x9f) || app_data[0] == 0xdc {
+        if let Ok(data) = rmp_serde::from_slice::<Vec<Option<serde_bytes::ByteBuf>>>(app_data) {
+            if let Some(Some(name_bytes)) = data.first() {
+                return String::from_utf8(name_bytes.to_vec()).ok();
+            }
+        }
+        if let Ok(data) = rmp_serde::from_slice::<Vec<Option<String>>>(app_data) {
+            if let Some(name) = data.first() {
+                return name.clone();
+            }
+        }
+        return None;
     }
 
-    let parsed: Result<(Option<String>, Option<serde_bytes::ByteBuf>), _> =
-        rmp_serde::from_slice(app_data);
-    if let Ok((Some(name), _)) = parsed {
-        return Some(name);
-    }
-
-    None
+    String::from_utf8(app_data.to_vec()).ok()
 }
