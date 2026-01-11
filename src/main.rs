@@ -154,7 +154,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         TuiCommand::DownloadFile { node, path, filename } => {
                             let event_tx = event_tx_clone.clone();
-                            let request = network_client_clone.fetch_page(&node, &path, std::collections::HashMap::new()).await;
+                            let request = network_client_clone.fetch_file(&node, &path).await;
                             let mut status_rx = request.status_receiver();
                             let filename_clone = filename.clone();
 
@@ -196,7 +196,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
 
                                 match request.result().await {
-                                    Ok(content) => {
+                                    Ok(data) => {
                                         let download_dir = std::path::Path::new(".nomad/downloads");
                                         if let Err(e) = std::fs::create_dir_all(download_dir) {
                                             let _ = event_tx.send(NetworkEvent::DownloadFailed {
@@ -207,7 +207,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         }
 
                                         let file_path = download_dir.join(&filename);
-                                        match std::fs::write(&file_path, content.as_bytes()) {
+                                        match std::fs::write(&file_path, &data) {
                                             Ok(_) => {
                                                 let _ = event_tx.send(NetworkEvent::DownloadComplete {
                                                     filename,
