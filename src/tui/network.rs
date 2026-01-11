@@ -5,7 +5,7 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph, Widget, Wrap},
+    widgets::{Block, Borders, List, ListItem, Paragraph, Widget},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

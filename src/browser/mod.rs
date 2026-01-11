@@ -154,6 +154,7 @@ impl Browser {
             fields: self.field_values.clone(),
             checkboxes: self.checkbox_states.clone(),
             radios: self.radio_states.clone(),
+            editing_field: None,
         };
         let config = RenderConfig {
             width,
@@ -305,7 +306,7 @@ impl Browser {
         };
 
         match &hitbox.target {
-            HitboxTarget::Link { url } => BrowserAction::Navigate { url: url.clone() },
+            HitboxTarget::Link { url, .. } => BrowserAction::Navigate { url: url.clone() },
             HitboxTarget::TextField { .. } => {
                 self.editing_field = Some(self.selected);
                 BrowserAction::None
@@ -411,7 +412,7 @@ impl Browser {
     pub fn selected_info(&self) -> Option<&str> {
         let hitbox = self.hitboxes.get(self.selected)?;
         match &hitbox.target {
-            HitboxTarget::Link { url } => Some(url),
+            HitboxTarget::Link { url, .. } => Some(url),
             HitboxTarget::TextField { name, .. } => Some(name),
             HitboxTarget::Checkbox { name } => Some(name),
             HitboxTarget::Radio { name, .. } => Some(name),
@@ -421,7 +422,7 @@ impl Browser {
     pub fn selected_link_url(&self) -> Option<&str> {
         let hitbox = self.hitboxes.get(self.selected)?;
         match &hitbox.target {
-            HitboxTarget::Link { url } => Some(url),
+            HitboxTarget::Link { url, .. } => Some(url),
             _ => None,
         }
     }
@@ -447,6 +448,7 @@ impl Browser {
             fields: self.field_values.clone(),
             checkboxes: self.checkbox_states.clone(),
             radios: self.radio_states.clone(),
+            editing_field: None,
         }
     }
 
@@ -493,6 +495,7 @@ impl Browser {
                         fields: self.field_values.clone(),
                         checkboxes: self.checkbox_states.clone(),
                         radios: self.radio_states.clone(),
+                        editing_field: None,
                     };
                     let config = RenderConfig {
                         width,
