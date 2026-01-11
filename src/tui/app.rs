@@ -2,7 +2,10 @@ use std::io::{self, Stdout};
 use std::time::{Duration, Instant};
 
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+        MouseEventKind,
+    },
     execute,
     terminal::{
         disable_raw_mode, enable_raw_mode, Clear, ClearType, EnterAlternateScreen,
@@ -21,7 +24,7 @@ use ratatui::{
 use tokio::sync::mpsc;
 
 use super::conversations::{ConversationPane, ConversationsView};
-use super::network::NetworkView;
+use super::network::{FocusArea, NetworkView};
 use super::tabs::{Tab, TabBar};
 
 #[derive(Debug, Clone)]
@@ -78,7 +81,12 @@ impl TuiApp {
     ) -> io::Result<Self> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen, Clear(ClearType::All))?;
+        execute!(
+            stdout,
+            EnterAlternateScreen,
+            EnableMouseCapture,
+            Clear(ClearType::All)
+        )?;
         let backend = CrosstermBackend::new(stdout);
         let mut terminal = Terminal::new(backend)?;
         terminal.clear()?;
@@ -325,21 +333,50 @@ impl TuiApp {
                     (KeyCode::Char('q'), false) => self.running = false,
                     (KeyCode::Char('c'), true) => self.running = false,
                     (KeyCode::Tab, false) => {
-                        if self.tab == Tab::Conversations
-                            && self.conversations.pane() != ConversationPane::List
+                        if self.tab == Tab::Network {
+                            self.network.toggle_focus();
+                        } else if self.tab == Tab::Conversations
+                            && self.conversations.pane() == ConversationPane::List
                         {
-                        } else {
                             self.tab = self.tab.next();
                         }
                     }
                     (KeyCode::BackTab, false) => self.tab = self.tab.prev(),
                     (KeyCode::Down | KeyCode::Char('j'), false) => self.handle_down(),
                     (KeyCode::Up | KeyCode::Char('k'), false) => self.handle_up(),
+                    (KeyCode::PageDown, false) => self.handle_page_down(),
+                    (KeyCode::PageUp, false) => self.handle_page_up(),
                     (KeyCode::Enter, false) => self.handle_enter(),
                     (KeyCode::Esc, false) => self.handle_escape(),
                     (KeyCode::Char('l'), true) => self.handle_ctrl_l(),
                     (KeyCode::Char('a'), false) => self.handle_announce(),
                     (KeyCode::Char('n'), false) => self.handle_new(),
+                    (KeyCode::Left, false) => self.handle_left(),
+                    (KeyCode::Right, false) => self.handle_right(),
+                    _ => {}
+                }
+            }
+
+            if let Event::Mouse(mouse) = event {
+                match mouse.kind {
+                    MouseEventKind::ScrollUp => {
+                        if self.tab == Tab::Network {
+                            self.network.browser_scroll_up();
+                        }
+                    }
+                    MouseEventKind::ScrollDown => {
+                        if self.tab == Tab::Network {
+                            self.network.browser_scroll_down();
+                        }
+                    }
+                    MouseEventKind::Down(_) => {
+                        if self.tab == Tab::Network {
+                            if let Some(_url) = self.network.browser_click(mouse.column, mouse.row)
+                            {
+                                // TODO: parse URL and fetch page
+                            }
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -350,14 +387,20 @@ impl TuiApp {
     fn handle_down(&mut self) {
         match self.tab {
             Tab::Conversations => self.conversations.select_next(),
-            Tab::Network => self.network.select_next(),
+            Tab::Network => match self.network.focus() {
+                FocusArea::NodeList => self.network.select_next(),
+                FocusArea::BrowserView => self.network.browser_scroll_down(),
+            },
         }
     }
 
     fn handle_up(&mut self) {
         match self.tab {
             Tab::Conversations => self.conversations.select_prev(),
-            Tab::Network => self.network.select_prev(),
+            Tab::Network => match self.network.focus() {
+                FocusArea::NodeList => self.network.select_prev(),
+                FocusArea::BrowserView => self.network.browser_scroll_up(),
+            },
         }
     }
 
@@ -375,13 +418,44 @@ impl TuiApp {
                     }
                 }
             }
-            Tab::Network => {
-                if let Some((node, path)) = self.network.connect_selected() {
-                    let _ = self
-                        .cmd_tx
-                        .blocking_send(TuiCommand::FetchPage { node, path });
+            Tab::Network => match self.network.focus() {
+                FocusArea::NodeList => {
+                    if let Some((node, path)) = self.network.connect_selected() {
+                        let _ = self
+                            .cmd_tx
+                            .blocking_send(TuiCommand::FetchPage { node, path });
+                    }
                 }
-            }
+                FocusArea::BrowserView => {
+                    if let Some(_url) = self.network.browser_activate() {
+                        // TODO: parse URL and fetch page
+                    }
+                }
+            },
+        }
+    }
+
+    fn handle_page_down(&mut self) {
+        if self.tab == Tab::Network && self.network.focus() == FocusArea::BrowserView {
+            self.network.browser_scroll_page_down();
+        }
+    }
+
+    fn handle_page_up(&mut self) {
+        if self.tab == Tab::Network && self.network.focus() == FocusArea::BrowserView {
+            self.network.browser_scroll_page_up();
+        }
+    }
+
+    fn handle_left(&mut self) {
+        if self.tab == Tab::Network && self.network.focus() == FocusArea::BrowserView {
+            self.network.browser_select_prev();
+        }
+    }
+
+    fn handle_right(&mut self) {
+        if self.tab == Tab::Network && self.network.focus() == FocusArea::BrowserView {
+            self.network.browser_select_next();
         }
     }
 
@@ -417,6 +491,10 @@ impl TuiApp {
 impl Drop for TuiApp {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
-        let _ = execute!(self.terminal.backend_mut(), LeaveAlternateScreen);
+        let _ = execute!(
+            self.terminal.backend_mut(),
+            DisableMouseCapture,
+            LeaveAlternateScreen
+        );
     }
 }
