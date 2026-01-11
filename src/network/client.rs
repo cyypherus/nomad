@@ -175,22 +175,26 @@ async fn fetch_page_inner(
     let mut link_events = tp.out_link_events();
     let link = tp.link(dest_desc).await;
     let link_id = *link.lock().await.id();
+    let already_active =
+        link.lock().await.status() == reticulum::destination::link::LinkStatus::Active;
     drop(tp);
 
-    let link_result =
-        wait_for_link_activation(&mut link_events, &link_id, &handle, LINK_TIMEOUT).await;
+    if !already_active {
+        let link_result =
+            wait_for_link_activation(&mut link_events, &link_id, &handle, LINK_TIMEOUT).await;
 
-    match link_result {
-        LinkWaitResult::Activated => {}
-        LinkWaitResult::Closed => {
-            check_cancelled!(handle);
-            handle.fail("Link closed".into());
-            return Ok(());
-        }
-        LinkWaitResult::Timeout => {
-            check_cancelled!(handle);
-            handle.fail("Connection timed out".into());
-            return Ok(());
+        match link_result {
+            LinkWaitResult::Activated => {}
+            LinkWaitResult::Closed => {
+                check_cancelled!(handle);
+                handle.fail("Link closed".into());
+                return Ok(());
+            }
+            LinkWaitResult::Timeout => {
+                check_cancelled!(handle);
+                handle.fail("Connection timed out".into());
+                return Ok(());
+            }
         }
     }
 

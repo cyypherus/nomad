@@ -1,6 +1,6 @@
 use micron::{
-    parse as parse_micron, render as render_micron, Document, Element, Field, FieldKind, FormState,
-    Link, RenderConfig,
+    parse as parse_micron, render_with_hitboxes, Document, FormState, Hitbox, HitboxTarget,
+    RenderConfig,
 };
 use ratatui::{
     buffer::Buffer,
@@ -27,22 +27,6 @@ struct PageEntry {
     scroll: u16,
 }
 
-#[derive(Debug, Clone)]
-enum InteractiveKind {
-    Link { url: String },
-    TextField { name: String, masked: bool },
-    Checkbox { name: String },
-    Radio { name: String, value: String },
-}
-
-#[derive(Debug, Clone)]
-struct Interactive {
-    kind: InteractiveKind,
-    line: usize,
-    col_start: usize,
-    col_end: usize,
-}
-
 pub struct Browser {
     state: BrowserState,
     current: Option<PageEntry>,
@@ -51,11 +35,12 @@ pub struct Browser {
     selected: usize,
     status: Option<String>,
     cached_doc: Option<Document>,
-    interactives: Vec<Interactive>,
+    hitboxes: Vec<Hitbox>,
     field_values: HashMap<String, String>,
     checkbox_states: HashMap<String, bool>,
     radio_states: HashMap<String, String>,
     editing_field: Option<usize>,
+    render_width: u16,
 }
 
 pub enum BrowserAction {
@@ -78,11 +63,12 @@ impl Browser {
             selected: 0,
             status: None,
             cached_doc: None,
-            interactives: Vec::new(),
+            hitboxes: Vec::new(),
             field_values: HashMap::new(),
             checkbox_states: HashMap::new(),
             radio_states: HashMap::new(),
             editing_field: None,
+            render_width: 80,
         }
     }
 
@@ -128,7 +114,7 @@ impl Browser {
 
     fn clear_page_state(&mut self) {
         self.cached_doc = None;
-        self.interactives.clear();
+        self.hitboxes.clear();
         self.field_values.clear();
         self.checkbox_states.clear();
         self.radio_states.clear();
@@ -143,7 +129,7 @@ impl Browser {
         }
     }
 
-    pub fn set_content(&mut self, url: &str, content: String) {
+    pub fn set_content(&mut self, url: &str, content: String, width: u16) {
         if self.current.as_ref().map(|e| e.url.as_str()) == Some(url) {
             if let Some(ref mut entry) = self.current {
                 entry.content = content.clone();
@@ -151,7 +137,7 @@ impl Browser {
             }
             self.state = BrowserState::Loaded;
             self.status = None;
-            self.rebuild_cache(&content);
+            self.rebuild_cache(&content, width);
         }
     }
 
@@ -162,24 +148,52 @@ impl Browser {
         }
     }
 
-    fn rebuild_cache(&mut self, content: &str) {
+    fn rebuild_cache(&mut self, content: &str, width: u16) {
         let doc = parse_micron(content);
-        self.interactives = extract_interactives(&doc);
+        let form_state = FormState {
+            fields: self.field_values.clone(),
+            checkboxes: self.checkbox_states.clone(),
+            radios: self.radio_states.clone(),
+        };
+        let config = RenderConfig {
+            width,
+            form_state: Some(&form_state),
+            ..Default::default()
+        };
+        let output = render_with_hitboxes(&doc, &config);
+        self.hitboxes = output.hitboxes;
+        self.render_width = width;
 
-        for interactive in &self.interactives {
-            match &interactive.kind {
-                InteractiveKind::TextField { name, .. } => {
+        log::debug!(
+            "rebuild_cache: width={}, found {} hitboxes",
+            width,
+            self.hitboxes.len()
+        );
+        for (i, hb) in self.hitboxes.iter().enumerate() {
+            log::debug!(
+                "  hitbox {}: line={} col={}..{} {:?}",
+                i,
+                hb.line,
+                hb.col_start,
+                hb.col_end,
+                hb.target
+            );
+        }
+
+        for hitbox in &self.hitboxes {
+            match &hitbox.target {
+                HitboxTarget::TextField { name, .. } => {
                     self.field_values.entry(name.clone()).or_default();
                 }
-                InteractiveKind::Checkbox { name } => {
+                HitboxTarget::Checkbox { name } => {
                     self.checkbox_states.entry(name.clone()).or_insert(false);
                 }
-                InteractiveKind::Radio { name, value } => {
+                HitboxTarget::Radio { name, value } => {
                     self.radio_states
                         .entry(name.clone())
                         .or_insert_with(|| value.clone());
                 }
-                InteractiveKind::Link { .. } => {}
+                HitboxTarget::Link { .. } => {}
             }
         }
 
@@ -200,7 +214,7 @@ impl Browser {
         self.current = Some(prev);
         if has_content {
             if let Some(ref entry) = self.current {
-                self.rebuild_cache(&entry.content.clone());
+                self.rebuild_cache(&entry.content.clone(), self.render_width);
             }
             self.state = BrowserState::Loaded;
             self.status = None;
@@ -224,7 +238,7 @@ impl Browser {
         self.current = Some(next);
         if has_content {
             if let Some(ref entry) = self.current {
-                self.rebuild_cache(&entry.content.clone());
+                self.rebuild_cache(&entry.content.clone(), self.render_width);
             }
             self.state = BrowserState::Loaded;
             self.status = None;
@@ -261,50 +275,47 @@ impl Browser {
     }
 
     pub fn select_next(&mut self) {
-        if !self.interactives.is_empty() {
-            self.selected = (self.selected + 1) % self.interactives.len();
+        if !self.hitboxes.is_empty() {
+            self.selected = (self.selected + 1) % self.hitboxes.len();
             self.scroll_to_selected();
         }
     }
 
     pub fn select_prev(&mut self) {
-        if !self.interactives.is_empty() {
+        if !self.hitboxes.is_empty() {
             self.selected = self
                 .selected
                 .checked_sub(1)
-                .unwrap_or(self.interactives.len() - 1);
+                .unwrap_or(self.hitboxes.len() - 1);
             self.scroll_to_selected();
         }
     }
 
     fn scroll_to_selected(&mut self) {
-        if let Some(interactive) = self.interactives.get(self.selected) {
+        if let Some(hitbox) = self.hitboxes.get(self.selected) {
             if let Some(ref mut entry) = self.current {
-                entry.scroll = interactive.line.saturating_sub(2) as u16;
+                entry.scroll = hitbox.line.saturating_sub(2) as u16;
             }
         }
     }
 
     pub fn activate(&mut self) -> BrowserAction {
-        let Some(interactive) = self.interactives.get(self.selected) else {
+        let Some(hitbox) = self.hitboxes.get(self.selected) else {
             return BrowserAction::None;
         };
 
-        match &interactive.kind {
-            InteractiveKind::Link { url } => {
-                let url = url.clone();
-                self.navigate(url)
-            }
-            InteractiveKind::TextField { name, .. } => {
+        match &hitbox.target {
+            HitboxTarget::Link { url } => BrowserAction::Navigate { url: url.clone() },
+            HitboxTarget::TextField { .. } => {
                 self.editing_field = Some(self.selected);
                 BrowserAction::None
             }
-            InteractiveKind::Checkbox { name } => {
+            HitboxTarget::Checkbox { name } => {
                 let current = self.checkbox_states.get(name).copied().unwrap_or(false);
                 self.checkbox_states.insert(name.clone(), !current);
                 BrowserAction::None
             }
-            InteractiveKind::Radio { name, value } => {
+            HitboxTarget::Radio { name, value } => {
                 self.radio_states.insert(name.clone(), value.clone());
                 BrowserAction::None
             }
@@ -319,10 +330,10 @@ impl Browser {
         let Some(idx) = self.editing_field else {
             return InputResult::NotConsumed;
         };
-        let Some(interactive) = self.interactives.get(idx) else {
+        let Some(hitbox) = self.hitboxes.get(idx) else {
             return InputResult::NotConsumed;
         };
-        if let InteractiveKind::TextField { name, .. } = &interactive.kind {
+        if let HitboxTarget::TextField { name, .. } = &hitbox.target {
             self.field_values.entry(name.clone()).or_default().push(c);
             InputResult::Consumed
         } else {
@@ -334,10 +345,10 @@ impl Browser {
         let Some(idx) = self.editing_field else {
             return InputResult::NotConsumed;
         };
-        let Some(interactive) = self.interactives.get(idx) else {
+        let Some(hitbox) = self.hitboxes.get(idx) else {
             return InputResult::NotConsumed;
         };
-        if let InteractiveKind::TextField { name, .. } = &interactive.kind {
+        if let HitboxTarget::TextField { name, .. } = &hitbox.target {
             if let Some(val) = self.field_values.get_mut(name) {
                 val.pop();
             }
@@ -348,16 +359,27 @@ impl Browser {
     }
 
     pub fn click(&mut self, x: u16, y: u16, content_area: Rect) -> BrowserAction {
+        log::debug!(
+            "click: x={} y={} content_area={:?} state={:?}",
+            x,
+            y,
+            content_area,
+            self.state
+        );
+
         if self.state != BrowserState::Loaded {
+            log::debug!("click: not loaded, ignoring");
             return BrowserAction::None;
         }
 
         let scroll = self.current.as_ref().map(|e| e.scroll).unwrap_or(0);
 
         if x < content_area.x || x >= content_area.x + content_area.width {
+            log::debug!("click: outside content area (x)");
             return BrowserAction::None;
         }
         if y < content_area.y || y >= content_area.y + content_area.height {
+            log::debug!("click: outside content area (y)");
             return BrowserAction::None;
         }
 
@@ -366,39 +388,46 @@ impl Browser {
         let doc_line = (rel_y + scroll) as usize;
         let doc_col = rel_x as usize;
 
-        for (idx, interactive) in self.interactives.iter().enumerate() {
-            if interactive.line == doc_line
-                && doc_col >= interactive.col_start
-                && doc_col < interactive.col_end
-            {
+        log::debug!(
+            "click: doc_line={} doc_col={} scroll={} hitboxes={}",
+            doc_line,
+            doc_col,
+            scroll,
+            self.hitboxes.len()
+        );
+
+        for (idx, hitbox) in self.hitboxes.iter().enumerate() {
+            if hitbox.line == doc_line && doc_col >= hitbox.col_start && doc_col < hitbox.col_end {
+                log::debug!("click: hit hitbox {}", idx);
                 self.selected = idx;
                 return self.activate();
             }
         }
 
+        log::debug!("click: no hitbox at position");
         BrowserAction::None
     }
 
     pub fn selected_info(&self) -> Option<&str> {
-        let interactive = self.interactives.get(self.selected)?;
-        match &interactive.kind {
-            InteractiveKind::Link { url } => Some(url),
-            InteractiveKind::TextField { name, .. } => Some(name),
-            InteractiveKind::Checkbox { name } => Some(name),
-            InteractiveKind::Radio { name, .. } => Some(name),
+        let hitbox = self.hitboxes.get(self.selected)?;
+        match &hitbox.target {
+            HitboxTarget::Link { url } => Some(url),
+            HitboxTarget::TextField { name, .. } => Some(name),
+            HitboxTarget::Checkbox { name } => Some(name),
+            HitboxTarget::Radio { name, .. } => Some(name),
         }
     }
 
     pub fn selected_link_url(&self) -> Option<&str> {
-        let interactive = self.interactives.get(self.selected)?;
-        match &interactive.kind {
-            InteractiveKind::Link { url } => Some(url),
+        let hitbox = self.hitboxes.get(self.selected)?;
+        match &hitbox.target {
+            HitboxTarget::Link { url } => Some(url),
             _ => None,
         }
     }
 
-    pub fn interactive_count(&self) -> usize {
-        self.interactives.len()
+    pub fn hitbox_count(&self) -> usize {
+        self.hitboxes.len()
     }
 
     pub fn field_value(&self, name: &str) -> Option<&str> {
@@ -470,7 +499,7 @@ impl Browser {
                         form_state: Some(&form_state),
                         ..Default::default()
                     };
-                    render_micron(doc, &config)
+                    render_with_hitboxes(doc, &config).text
                 } else {
                     Text::from(Line::from("(empty page)"))
                 }
@@ -500,61 +529,6 @@ impl Default for Browser {
     }
 }
 
-fn extract_interactives(doc: &Document) -> Vec<Interactive> {
-    let mut result = Vec::new();
-    for (line_idx, line) in doc.lines.iter().enumerate() {
-        let mut col = 0usize;
-        for element in &line.elements {
-            match element {
-                Element::Link(Link { url, label, .. }) => {
-                    let len = label.chars().count();
-                    result.push(Interactive {
-                        kind: InteractiveKind::Link { url: url.clone() },
-                        line: line_idx,
-                        col_start: col,
-                        col_end: col + len,
-                    });
-                    col += len;
-                }
-                Element::Field(Field {
-                    name,
-                    width,
-                    masked,
-                    kind,
-                    ..
-                }) => {
-                    let w = width.unwrap_or(24) as usize;
-                    let interactive_kind = match kind {
-                        FieldKind::Text => InteractiveKind::TextField {
-                            name: name.clone(),
-                            masked: *masked,
-                        },
-                        FieldKind::Checkbox { .. } => {
-                            InteractiveKind::Checkbox { name: name.clone() }
-                        }
-                        FieldKind::Radio { value, .. } => InteractiveKind::Radio {
-                            name: name.clone(),
-                            value: value.clone(),
-                        },
-                    };
-                    result.push(Interactive {
-                        kind: interactive_kind,
-                        line: line_idx,
-                        col_start: col,
-                        col_end: col + w,
-                    });
-                    col += w;
-                }
-                Element::Text(t) => {
-                    col += t.text.chars().count();
-                }
-                Element::Partial(_) => {}
-            }
-        }
-    }
-    result
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -581,7 +555,7 @@ mod tests {
     fn set_content_transitions_to_loaded() {
         let mut browser = Browser::new();
         browser.navigate("abc123:page.mu".into());
-        browser.set_content("abc123:page.mu", "Hello".into());
+        browser.set_content("abc123:page.mu", "Hello".into(), 80);
         assert_eq!(browser.state(), BrowserState::Loaded);
     }
 
@@ -589,10 +563,10 @@ mod tests {
     fn back_forward_navigation() {
         let mut browser = Browser::new();
         browser.navigate("hash1:page1.mu".into());
-        browser.set_content("hash1:page1.mu", "Page 1".into());
+        browser.set_content("hash1:page1.mu", "Page 1".into(), 80);
 
         browser.navigate("hash2:page2.mu".into());
-        browser.set_content("hash2:page2.mu", "Page 2".into());
+        browser.set_content("hash2:page2.mu", "Page 2".into(), 80);
 
         assert!(browser.can_go_back());
         assert!(!browser.can_go_forward());
@@ -609,7 +583,7 @@ mod tests {
     fn scroll() {
         let mut browser = Browser::new();
         browser.navigate("abc:page.mu".into());
-        browser.set_content("abc:page.mu", "content".into());
+        browser.set_content("abc:page.mu", "content".into(), 80);
 
         browser.scroll_down();
         browser.scroll_down();
@@ -626,18 +600,19 @@ mod tests {
         browser.set_content(
             "abc:page.mu",
             "`[Link 1`http://a]\n`[Link 2`http://b]".into(),
+            80,
         );
 
-        assert_eq!(browser.interactive_count(), 2);
+        assert_eq!(browser.hitbox_count(), 2);
     }
 
     #[test]
     fn click_on_link() {
         let mut browser = Browser::new();
         browser.navigate("abc:page.mu".into());
-        browser.set_content("abc:page.mu", "`[Click Me`http://target]".into());
+        browser.set_content("abc:page.mu", "`[Click Me`http://target]".into(), 80);
 
-        assert_eq!(browser.interactive_count(), 1);
+        assert_eq!(browser.hitbox_count(), 1);
 
         let area = Rect::new(0, 0, 80, 24);
         let req = browser.click(3, 0, area);
@@ -649,7 +624,7 @@ mod tests {
     fn click_outside_link() {
         let mut browser = Browser::new();
         browser.navigate("abc:page.mu".into());
-        browser.set_content("abc:page.mu", "Some text `[Link`http://x]".into());
+        browser.set_content("abc:page.mu", "Some text `[Link`http://x]".into(), 80);
 
         let area = Rect::new(0, 0, 80, 24);
         let req = browser.click(0, 0, area);
@@ -661,7 +636,7 @@ mod tests {
     fn checkbox_toggle() {
         let mut browser = Browser::new();
         browser.navigate("abc:page.mu".into());
-        browser.set_content("abc:page.mu", "`<?|agree|yes`I agree>".into());
+        browser.set_content("abc:page.mu", "`<?|agree|yes`I agree>".into(), 80);
 
         assert!(!browser.checkbox_checked("agree"));
 
@@ -676,7 +651,7 @@ mod tests {
     fn text_field_input() {
         let mut browser = Browser::new();
         browser.navigate("abc:page.mu".into());
-        browser.set_content("abc:page.mu", "`<|name`Enter name>".into());
+        browser.set_content("abc:page.mu", "`<|name`Enter name>".into(), 80);
 
         browser.activate();
         assert!(browser.is_editing());

@@ -24,6 +24,7 @@ pub struct NetworkView {
     nodes: Vec<NodeInfo>,
     announces: Vec<NodeInfo>,
     selected: usize,
+    list_offset: usize,
     left_mode: LeftPanelMode,
     focus: FocusArea,
 
@@ -35,6 +36,7 @@ pub struct NetworkView {
     last_announce_secs: u64,
 
     last_content_area: Rect,
+    last_list_height: usize,
 }
 
 impl NetworkView {
@@ -43,6 +45,7 @@ impl NetworkView {
             nodes,
             announces: Vec::new(),
             selected: 0,
+            list_offset: 0,
             left_mode: LeftPanelMode::Nodes,
             focus: FocusArea::NodeList,
             browser: Browser::new(),
@@ -51,6 +54,7 @@ impl NetworkView {
             our_name: "Anonymous Peer".to_string(),
             last_announce_secs: 0,
             last_content_area: Rect::default(),
+            last_list_height: 0,
         }
     }
 
@@ -76,12 +80,14 @@ impl NetworkView {
             LeftPanelMode::Announces => LeftPanelMode::Nodes,
         };
         self.selected = 0;
+        self.list_offset = 0;
     }
 
     pub fn select_next(&mut self) {
         let len = self.current_list_len();
         if len > 0 {
             self.selected = (self.selected + 1) % len;
+            self.adjust_list_scroll();
         }
     }
 
@@ -89,6 +95,18 @@ impl NetworkView {
         let len = self.current_list_len();
         if len > 0 {
             self.selected = self.selected.checked_sub(1).unwrap_or(len - 1);
+            self.adjust_list_scroll();
+        }
+    }
+
+    fn adjust_list_scroll(&mut self) {
+        if self.last_list_height == 0 {
+            return;
+        }
+        if self.selected < self.list_offset {
+            self.list_offset = self.selected;
+        } else if self.selected >= self.list_offset + self.last_list_height {
+            self.list_offset = self.selected - self.last_list_height + 1;
         }
     }
 
@@ -145,6 +163,21 @@ impl NetworkView {
     }
 
     pub fn navigate_to_link(&mut self, link_url: &str) -> Option<(NodeInfo, String)> {
+        if let Some(rest) = link_url.strip_prefix(':') {
+            if let Some(ref node) = self.current_node {
+                let path = if rest.starts_with('/') {
+                    rest.to_string()
+                } else {
+                    format!("/{}", rest)
+                };
+                let url = format!("{}:{}", node.hash_hex(), path);
+                let node = node.clone();
+                self.browser.navigate(url);
+                return Some((node, path));
+            }
+            return None;
+        }
+
         if link_url.contains(':') {
             let parts: Vec<&str> = link_url.splitn(2, ':').collect();
             if parts.len() == 2 && parts[0].len() == 32 {
@@ -156,17 +189,27 @@ impl NetworkView {
                         let mut hash = [0u8; 16];
                         hash.copy_from_slice(&hash_bytes);
 
-                        if let Some(node) = self
+                        let node = self
                             .nodes
                             .iter()
                             .find(|n| n.hash == hash)
                             .cloned()
                             .or_else(|| self.announces.iter().find(|n| n.hash == hash).cloned())
-                        {
+                            .or_else(|| {
+                                self.current_node
+                                    .as_ref()
+                                    .filter(|n| n.hash == hash)
+                                    .cloned()
+                            });
+
+                        if let Some(node) = node {
                             let url = format!("{}:{}", node.hash_hex(), path);
                             self.current_node = Some(node.clone());
                             self.browser.navigate(url);
                             return Some((node, path));
+                        } else {
+                            log::warn!("Cannot navigate to unknown node: {}", hash_hex);
+                            return None;
                         }
                     }
                 }
@@ -193,7 +236,12 @@ impl NetworkView {
     }
 
     pub fn set_page_content(&mut self, url: String, content: String) {
-        self.browser.set_content(&url, content);
+        let width = if self.last_content_area.width > 0 {
+            self.last_content_area.width
+        } else {
+            80
+        };
+        self.browser.set_content(&url, content, width);
     }
 
     pub fn set_connection_failed(&mut self, url: String, reason: String) {
@@ -279,7 +327,7 @@ impl NetworkView {
         self.browser.is_editing()
     }
 
-    fn render_left_panel(&self, area: Rect, buf: &mut Buffer) {
+    fn render_left_panel(&mut self, area: Rect, buf: &mut Buffer) {
         let title = match self.left_mode {
             LeftPanelMode::Nodes => "Saved Nodes",
             LeftPanelMode::Announces => "Announces",
@@ -291,11 +339,20 @@ impl NetworkView {
             Style::default().fg(Color::DarkGray)
         };
 
+        let block = Block::default()
+            .title(title)
+            .borders(Borders::ALL)
+            .border_style(border_style);
+        let inner = block.inner(area);
+        self.last_list_height = inner.height as usize;
+
         let items: Vec<ListItem> = match self.left_mode {
             LeftPanelMode::Nodes => self
                 .nodes
                 .iter()
                 .enumerate()
+                .skip(self.list_offset)
+                .take(inner.height as usize)
                 .map(|(i, node)| {
                     let style = if i == self.selected {
                         Style::default()
@@ -311,6 +368,8 @@ impl NetworkView {
                 .announces
                 .iter()
                 .enumerate()
+                .skip(self.list_offset)
+                .take(inner.height as usize)
                 .map(|(i, node)| {
                     let style = if i == self.selected {
                         Style::default()
@@ -324,13 +383,7 @@ impl NetworkView {
                 .collect(),
         };
 
-        let list = List::new(items).block(
-            Block::default()
-                .title(title)
-                .borders(Borders::ALL)
-                .border_style(border_style),
-        );
-
+        let list = List::new(items).block(block);
         Widget::render(list, area, buf);
     }
 
