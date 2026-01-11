@@ -22,9 +22,12 @@ use ratatui::{
     Terminal,
 };
 use tokio::sync::mpsc;
+use tui_input::backend::crossterm::EventHandler;
+use tui_input::Input;
 
 use super::browser_view::BrowserView;
 use super::discovery::{DiscoveryView, ModalAction};
+use super::modal::{Modal, ModalButton};
 use super::mynode::MyNodeView;
 use super::saved::{SavedModalAction, SavedView};
 use super::status_bar::StatusBar;
@@ -61,10 +64,11 @@ pub enum TuiCommand {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum AppMode {
     Normal,
     Browser,
+    Editing { field_name: String, masked: bool },
 }
 
 pub struct TuiApp {
@@ -79,6 +83,8 @@ pub struct TuiApp {
     mynode: MyNodeView,
     browser: BrowserView,
     status_bar: StatusBar,
+    input: Input,
+    last_edit_popup_area: Rect,
 
     event_rx: mpsc::Receiver<NetworkEvent>,
     cmd_tx: mpsc::Sender<TuiCommand>,
@@ -123,6 +129,8 @@ impl TuiApp {
             mynode: MyNodeView::new(dest_hash),
             browser: BrowserView::new(),
             status_bar: StatusBar::new(),
+            input: Input::default(),
+            last_edit_popup_area: Rect::default(),
             event_rx,
             cmd_tx,
             last_main_area: Rect::default(),
@@ -159,7 +167,9 @@ impl TuiApp {
                     self.browser.set_page_content(&url, &content);
                 }
                 NetworkEvent::PageFailed { url, reason } => {
-                    self.status_bar.set_status(format!("Failed to load {}: {}", url, reason));
+                    self.browser.clear_loading();
+                    self.status_bar
+                        .set_status(format!("Failed to load {}: {}", url, reason));
                 }
                 NetworkEvent::MessageReceived(_)
                 | NetworkEvent::ConversationsUpdated(_)
@@ -170,10 +180,13 @@ impl TuiApp {
 
     fn draw(&mut self) -> io::Result<()> {
         let tab = self.tab;
-        let mode = self.mode;
+        let mode = self.mode.clone();
         let keybinds = self.keybinds_for_mode();
+        let input_value = self.input.value().to_string();
+        let input_cursor = self.input.visual_cursor();
 
         let mut main_area = Rect::default();
+        let mut last_edit_popup_area = Rect::default();
 
         self.terminal.draw(|frame| {
             let area = frame.area();
@@ -230,15 +243,52 @@ impl TuiApp {
 
             main_area = chunks[1];
 
-            match mode {
+            match &mode {
                 AppMode::Normal => match tab {
                     Tab::Discovery => frame.render_widget(&mut self.discovery, chunks[1]),
                     Tab::Saved => frame.render_widget(&mut self.saved, chunks[1]),
                     Tab::MyNode => frame.render_widget(&mut self.mynode, chunks[1]),
                 },
-                AppMode::Browser => {
+                AppMode::Browser | AppMode::Editing { .. } => {
                     frame.render_widget(&mut self.browser, chunks[1]);
                 }
+            }
+
+            if let AppMode::Editing { field_name, masked } = &mode {
+                let inner_width = 50u16.saturating_sub(4);
+                let scroll = input_cursor.saturating_sub(inner_width as usize);
+
+                let display_value = if *masked {
+                    "*".repeat(input_value.len())
+                } else {
+                    input_value.clone()
+                };
+
+                let scrolled_value: String = display_value.chars().skip(scroll).collect();
+
+                let content = vec![
+                    Line::from(Span::styled(
+                        scrolled_value,
+                        Style::default().fg(Color::White),
+                    )),
+                    Line::from(""),
+                ];
+
+                let modal = Modal::new(field_name)
+                    .content(content)
+                    .buttons(vec![
+                        ModalButton::new("Confirm", Color::Green),
+                        ModalButton::new("Cancel", Color::Red),
+                    ])
+                    .border_color(Color::Cyan);
+
+                let popup_area = modal.render_centered(area, frame.buffer_mut(), 50, 6);
+                last_edit_popup_area = popup_area;
+
+                let inner_x = popup_area.x + 1;
+                let inner_y = popup_area.y + 1;
+                let cursor_x = inner_x + (input_cursor - scroll) as u16;
+                frame.set_cursor_position((cursor_x, inner_y));
             }
 
             let footer =
@@ -247,21 +297,30 @@ impl TuiApp {
         })?;
 
         self.last_main_area = main_area;
+        self.last_edit_popup_area = last_edit_popup_area;
 
         Ok(())
     }
 
     fn keybinds_for_mode(&self) -> Line<'static> {
-        match self.mode {
+        match &self.mode {
+            AppMode::Editing { .. } => Line::from(vec![
+                Span::styled(" [Enter]", Style::default().fg(Color::Magenta)),
+                Span::raw(" Confirm  "),
+                Span::styled("[Esc]", Style::default().fg(Color::Magenta)),
+                Span::raw(" Cancel  "),
+            ]),
             AppMode::Browser => Line::from(vec![
                 Span::styled(" [Esc]", Style::default().fg(Color::Magenta)),
                 Span::raw(" Back  "),
                 Span::styled("[j/k]", Style::default().fg(Color::Magenta)),
                 Span::raw(" Scroll  "),
                 Span::styled("[Tab]", Style::default().fg(Color::Magenta)),
-                Span::raw(" Next Link  "),
+                Span::raw(" Next  "),
                 Span::styled("[Enter]", Style::default().fg(Color::Magenta)),
                 Span::raw(" Activate  "),
+                Span::styled("[r]", Style::default().fg(Color::Magenta)),
+                Span::raw(" Reload  "),
             ]),
             AppMode::Normal => match self.tab {
                 Tab::Discovery => {
@@ -324,7 +383,7 @@ impl TuiApp {
             }
         }
 
-        match evt {
+        match &evt {
             Event::Key(key) => {
                 let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
@@ -333,13 +392,16 @@ impl TuiApp {
                     return Ok(());
                 }
 
-                match self.mode {
+                match &self.mode {
+                    AppMode::Editing { .. } => self.handle_editing_key(&evt),
                     AppMode::Browser => self.handle_browser_key(key.code),
                     AppMode::Normal => self.handle_normal_key(key.code, ctrl),
                 }
             }
             Event::Mouse(mouse) => {
-                self.handle_mouse(mouse.kind, mouse.column, mouse.row);
+                if !matches!(self.mode, AppMode::Editing { .. }) {
+                    self.handle_mouse(mouse.kind, mouse.column, mouse.row);
+                }
             }
             _ => {}
         }
@@ -409,14 +471,94 @@ impl TuiApp {
             KeyCode::Left => self.browser.select_prev(),
             KeyCode::Right => self.browser.select_next(),
             KeyCode::Enter => {
-                if let Some(link) = self.browser.interact() {
-                    self.navigate_to_link(link);
+                if let Some(interaction) = self.browser.interact() {
+                    self.handle_interaction(interaction);
                 }
             }
             KeyCode::Backspace => {
                 self.browser.go_back();
             }
+            KeyCode::Char('r') => {
+                self.reload_page();
+            }
             _ => {}
+        }
+    }
+
+    fn handle_editing_key(&mut self, evt: &Event) {
+        if let Event::Key(key) = evt {
+            match key.code {
+                KeyCode::Enter => {
+                    self.confirm_edit();
+                }
+                KeyCode::Esc => {
+                    self.cancel_edit();
+                }
+                _ => {
+                    self.input.handle_event(evt);
+                }
+            }
+        }
+    }
+
+    fn confirm_edit(&mut self) {
+        if let AppMode::Editing { field_name, .. } = &self.mode {
+            let value = self.input.value().to_string();
+            let name = field_name.clone();
+            self.browser.set_field_value(&name, value);
+        }
+        self.input.reset();
+        self.mode = AppMode::Browser;
+    }
+
+    fn cancel_edit(&mut self) {
+        self.input.reset();
+        self.mode = AppMode::Browser;
+    }
+
+    fn handle_edit_modal_click(&mut self, x: u16, y: u16) {
+        let modal = Modal::new("")
+            .buttons(vec![
+                ModalButton::new("Confirm", Color::Green),
+                ModalButton::new("Cancel", Color::Red),
+            ])
+            .selected(0);
+
+        if let Some(idx) = modal.hit_test_buttons(x, y, self.last_edit_popup_area) {
+            match idx {
+                0 => self.confirm_edit(),
+                1 => self.cancel_edit(),
+                _ => {}
+            }
+        }
+    }
+
+    fn handle_interaction(&mut self, interaction: micronaut::Interaction) {
+        match interaction {
+            micronaut::Interaction::Link(link) => {
+                self.navigate_to_link(link);
+            }
+            micronaut::Interaction::EditField(field) => {
+                self.input = Input::new(field.value);
+                self.mode = AppMode::Editing {
+                    field_name: field.name,
+                    masked: field.masked,
+                };
+            }
+        }
+    }
+
+    fn reload_page(&mut self) {
+        if let Some(node) = self.browser.current_node().cloned() {
+            if let Some(url) = self.browser.current_url() {
+                let path = url.to_string();
+                self.browser.set_loading(path.clone());
+                let _ = self.cmd_tx.blocking_send(TuiCommand::FetchPage {
+                    node,
+                    path,
+                    form_data: std::collections::HashMap::new(),
+                });
+            }
         }
     }
 
@@ -432,17 +574,27 @@ impl TuiApp {
                     }
                 }
 
-                match self.mode {
+                match &self.mode {
                     AppMode::Browser => {
                         use super::browser_view::NavAction;
                         if let Some(nav) = self.browser.click_nav(x, y) {
                             match nav {
-                                NavAction::Back => { self.browser.go_back(); }
-                                NavAction::Forward => { self.browser.go_forward(); }
+                                NavAction::Back => {
+                                    self.browser.go_back();
+                                }
+                                NavAction::Forward => {
+                                    self.browser.go_forward();
+                                }
+                                NavAction::Reload => {
+                                    self.reload_page();
+                                }
                             }
-                        } else if let Some(link) = self.browser.click(x, y) {
-                            self.navigate_to_link(link);
+                        } else if let Some(interaction) = self.browser.click(x, y) {
+                            self.handle_interaction(interaction);
                         }
+                    }
+                    AppMode::Editing { .. } => {
+                        self.handle_edit_modal_click(x, y);
                     }
                     AppMode::Normal => {
                         if self.discovery.is_modal_open() {
@@ -482,13 +634,15 @@ impl TuiApp {
                     }
                 }
             }
-            MouseEventKind::ScrollUp => match self.mode {
+            MouseEventKind::ScrollUp => match &self.mode {
                 AppMode::Browser => self.browser.scroll_up(),
                 AppMode::Normal => self.handle_up(),
+                AppMode::Editing { .. } => {}
             },
-            MouseEventKind::ScrollDown => match self.mode {
+            MouseEventKind::ScrollDown => match &self.mode {
                 AppMode::Browser => self.browser.scroll_down(),
                 AppMode::Normal => self.handle_down(),
+                AppMode::Editing { .. } => {}
             },
             _ => {}
         }
@@ -592,6 +746,7 @@ impl TuiApp {
 
         if let Some((node, path)) = self.browser.resolve_link(&link, &all_nodes) {
             self.browser.set_current_node(node.clone());
+            self.browser.set_loading(path.clone());
             let _ = self.cmd_tx.blocking_send(TuiCommand::FetchPage {
                 node,
                 path,

@@ -1,11 +1,15 @@
+use super::modal::{Modal, ModalButton};
 use crate::network::NodeInfo;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Widget},
+    widgets::{Block, Borders, List, ListItem, Paragraph, Widget},
 };
+
+const MODAL_WIDTH: u16 = 50;
+const MODAL_HEIGHT: u16 = 13;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModalAction {
@@ -22,6 +26,7 @@ pub struct DiscoveryView {
     modal_open: bool,
     modal_selected: usize,
     last_height: usize,
+    last_modal_area: Rect,
 }
 
 impl Default for DiscoveryView {
@@ -39,6 +44,7 @@ impl DiscoveryView {
             modal_open: false,
             modal_selected: 0,
             last_height: 10,
+            last_modal_area: Rect::default(),
         }
     }
 
@@ -139,46 +145,64 @@ impl DiscoveryView {
         }
     }
 
-    pub fn click_modal(&mut self, x: u16, y: u16, area: Rect) -> ModalAction {
+    pub fn click_modal(&mut self, x: u16, y: u16, _area: Rect) -> ModalAction {
         if !self.modal_open {
             return ModalAction::None;
         }
 
-        let modal_width = 50.min(area.width.saturating_sub(4));
-        let modal_height = 13.min(area.height.saturating_sub(4));
-        let modal_x = area.x + (area.width.saturating_sub(modal_width)) / 2;
-        let modal_y = area.y + (area.height.saturating_sub(modal_height)) / 2;
-
-        let inner_x = modal_x + 1;
-        let inner_y = modal_y + 1;
-        let inner_height = modal_height.saturating_sub(2);
-
-        let button_y = inner_y + inner_height.saturating_sub(2);
-        let inner_width = modal_width.saturating_sub(2);
-        let center_x = inner_x + inner_width / 2;
-
-        if y != button_y {
-            return ModalAction::None;
+        let modal = self.build_modal();
+        if let Some(idx) = modal.hit_test_buttons(x, y, self.last_modal_area) {
+            match idx {
+                0 => ModalAction::Connect,
+                1 => ModalAction::Save,
+                2 => ModalAction::Dismiss,
+                _ => ModalAction::None,
+            }
+        } else {
+            ModalAction::None
         }
+    }
 
-        let connect_start = center_x.saturating_sub(22);
-        let connect_end = connect_start + 9;
-        let save_start = center_x.saturating_sub(6);
-        let save_end = save_start + 6;
-        let cancel_start = center_x + 8;
-        let cancel_end = cancel_start + 9;
+    fn build_modal(&self) -> Modal<'_> {
+        let node = self.selected_node().unwrap();
+        let hash_hex = node.hash_hex();
 
-        if x >= connect_start && x < connect_end {
-            return ModalAction::Connect;
-        }
-        if x >= save_start && x < save_end {
-            return ModalAction::Save;
-        }
-        if x >= cancel_start && x < cancel_end {
-            return ModalAction::Dismiss;
-        }
+        let content = vec![
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("  Name: ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    &node.name,
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]),
+            Line::from(""),
+            Line::from(vec![Span::styled(
+                "  Hash: ",
+                Style::default().fg(Color::DarkGray),
+            )]),
+            Line::from(vec![Span::styled(
+                format!("  {}", &hash_hex[..16]),
+                Style::default().fg(Color::Cyan),
+            )]),
+            Line::from(vec![Span::styled(
+                format!("  {}", &hash_hex[16..]),
+                Style::default().fg(Color::Cyan),
+            )]),
+            Line::from(""),
+            Line::from(""),
+        ];
 
-        ModalAction::None
+        Modal::new("Node")
+            .content(content)
+            .buttons(vec![
+                ModalButton::new("Connect", Color::Magenta),
+                ModalButton::new("Save", Color::Green),
+                ModalButton::new("Cancel", Color::Red),
+            ])
+            .selected(self.modal_selected)
     }
 
     pub fn render_list(&mut self, area: Rect, buf: &mut Buffer) {
@@ -260,113 +284,13 @@ impl DiscoveryView {
         list.render(inner, buf);
     }
 
-    pub fn render_modal(&self, area: Rect, buf: &mut Buffer) {
-        if !self.modal_open {
+    pub fn render_modal(&mut self, area: Rect, buf: &mut Buffer) {
+        if !self.modal_open || self.selected_node().is_none() {
             return;
         }
 
-        let Some(node) = self.selected_node() else {
-            return;
-        };
-
-        let modal_width = 50.min(area.width.saturating_sub(4));
-        let modal_height = 13.min(area.height.saturating_sub(4));
-        let modal_x = area.x + (area.width.saturating_sub(modal_width)) / 2;
-        let modal_y = area.y + (area.height.saturating_sub(modal_height)) / 2;
-
-        let modal_area = Rect::new(modal_x, modal_y, modal_width, modal_height);
-
-        Clear.render(modal_area, buf);
-
-        let block = Block::default()
-            .title(Line::from(vec![Span::styled(
-                " Node ",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            )]))
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Magenta));
-
-        let inner = block.inner(modal_area);
-        block.render(modal_area, buf);
-
-        let hash_hex = node.hash_hex();
-        let content = vec![
-            Line::from(""),
-            Line::from(vec![
-                Span::styled("  Name: ", Style::default().fg(Color::DarkGray)),
-                Span::styled(
-                    &node.name,
-                    Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD),
-                ),
-            ]),
-            Line::from(""),
-            Line::from(vec![Span::styled(
-                "  Hash: ",
-                Style::default().fg(Color::DarkGray),
-            )]),
-            Line::from(vec![Span::styled(
-                format!("  {}", &hash_hex[..16]),
-                Style::default().fg(Color::Cyan),
-            )]),
-            Line::from(vec![Span::styled(
-                format!("  {}", &hash_hex[16..]),
-                Style::default().fg(Color::Cyan),
-            )]),
-            Line::from(""),
-        ];
-
-        Paragraph::new(content).render(
-            Rect::new(
-                inner.x,
-                inner.y,
-                inner.width,
-                inner.height.saturating_sub(2),
-            ),
-            buf,
-        );
-
-        let button_y = inner.y + inner.height.saturating_sub(2);
-        let center_x = inner.x + inner.width / 2;
-
-        let connect_style = if self.modal_selected == 0 {
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Magenta)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(Color::Magenta)
-        };
-
-        let save_style = if self.modal_selected == 1 {
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Green)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(Color::Green)
-        };
-
-        let cancel_style = if self.modal_selected == 2 {
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Red)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(Color::Red)
-        };
-
-        buf.set_string(
-            center_x.saturating_sub(22),
-            button_y,
-            " Connect ",
-            connect_style,
-        );
-        buf.set_string(center_x.saturating_sub(6), button_y, " Save ", save_style);
-        buf.set_string(center_x + 8, button_y, " Cancel ", cancel_style);
+        let modal = self.build_modal();
+        self.last_modal_area = modal.render_centered(area, buf, MODAL_WIDTH, MODAL_HEIGHT);
     }
 }
 

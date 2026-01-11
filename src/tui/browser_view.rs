@@ -1,5 +1,5 @@
 use crate::network::NodeInfo;
-use micronaut::{Browser, BrowserWidget, Link, RatatuiRenderer};
+use micronaut::{Browser, BrowserWidget, Interaction, Link, RatatuiRenderer};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -12,14 +12,17 @@ use ratatui::{
 pub enum NavAction {
     Back,
     Forward,
+    Reload,
 }
 
 pub struct BrowserView {
     browser: Browser<RatatuiRenderer>,
     current_node: Option<NodeInfo>,
+    loading_url: Option<String>,
     last_content_area: Rect,
     last_back_btn_area: Rect,
     last_fwd_btn_area: Rect,
+    last_reload_btn_area: Rect,
 }
 
 impl Default for BrowserView {
@@ -33,9 +36,11 @@ impl BrowserView {
         Self {
             browser: Browser::new(RatatuiRenderer),
             current_node: None,
+            loading_url: None,
             last_content_area: Rect::default(),
             last_back_btn_area: Rect::default(),
             last_fwd_btn_area: Rect::default(),
+            last_reload_btn_area: Rect::default(),
         }
     }
 
@@ -48,7 +53,16 @@ impl BrowserView {
     }
 
     pub fn set_page_content(&mut self, url: &str, content: &str) {
+        self.loading_url = None;
         self.browser.set_content(url, content);
+    }
+
+    pub fn set_loading(&mut self, url: String) {
+        self.loading_url = Some(url);
+    }
+
+    pub fn clear_loading(&mut self) {
+        self.loading_url = None;
     }
 
     pub fn scroll_up(&mut self) {
@@ -60,7 +74,8 @@ impl BrowserView {
     }
 
     pub fn scroll_page_up(&mut self) {
-        self.browser.scroll_by(-(self.last_content_area.height as i32));
+        self.browser
+            .scroll_by(-(self.last_content_area.height as i32));
     }
 
     pub fn scroll_page_down(&mut self) {
@@ -75,7 +90,7 @@ impl BrowserView {
         self.browser.select_prev();
     }
 
-    pub fn interact(&mut self) -> Option<Link> {
+    pub fn interact(&mut self) -> Option<Interaction> {
         self.browser.interact()
     }
 
@@ -91,13 +106,23 @@ impl BrowserView {
         if self.last_back_btn_area.intersects(Rect::new(x, y, 1, 1)) && self.browser.can_go_back() {
             return Some(NavAction::Back);
         }
-        if self.last_fwd_btn_area.intersects(Rect::new(x, y, 1, 1)) && self.browser.can_go_forward() {
+        if self.last_fwd_btn_area.intersects(Rect::new(x, y, 1, 1)) && self.browser.can_go_forward()
+        {
             return Some(NavAction::Forward);
+        }
+        if self.last_reload_btn_area.intersects(Rect::new(x, y, 1, 1))
+            && self.browser.url().is_some()
+        {
+            return Some(NavAction::Reload);
         }
         None
     }
 
-    pub fn click(&mut self, x: u16, y: u16) -> Option<Link> {
+    pub fn current_url(&self) -> Option<&str> {
+        self.browser.url()
+    }
+
+    pub fn click(&mut self, x: u16, y: u16) -> Option<Interaction> {
         let area = self.last_content_area;
         if x >= area.x && x < area.x + area.width && y >= area.y && y < area.y + area.height {
             let rel_x = x - area.x;
@@ -108,9 +133,13 @@ impl BrowserView {
         }
     }
 
-    pub fn resolve_link(&self, link: &Link, known_nodes: &[NodeInfo]) -> Option<(NodeInfo, String)> {
+    pub fn resolve_link(
+        &self,
+        link: &Link,
+        known_nodes: &[NodeInfo],
+    ) -> Option<(NodeInfo, String)> {
         let link_url = &link.url;
-        
+
         if let Some(rest) = link_url.strip_prefix(':') {
             if let Some(ref node) = self.current_node {
                 let path = if rest.starts_with('/') {
@@ -168,6 +197,10 @@ impl BrowserView {
     pub fn last_content_area(&self) -> Rect {
         self.last_content_area
     }
+
+    pub fn set_field_value(&mut self, name: &str, value: String) {
+        self.browser.set_field_value(name, value);
+    }
 }
 
 impl Widget for &mut BrowserView {
@@ -215,21 +248,44 @@ impl Widget for &mut BrowserView {
         } else {
             Style::default().fg(Color::DarkGray)
         };
+        let reload_style = if self.browser.url().is_some() {
+            Style::default().fg(Color::Cyan)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
 
-        let nav_bar = Line::from(vec![
+        let url_span = if let Some(loading) = &self.loading_url {
+            vec![
+                Span::styled("Loading: ", Style::default().fg(Color::Yellow)),
+                Span::styled(loading.clone(), Style::default().fg(Color::Yellow)),
+            ]
+        } else if let Some(url) = self.browser.url() {
+            vec![Span::styled(
+                url.to_string(),
+                Style::default().fg(Color::DarkGray),
+            )]
+        } else {
+            vec![Span::styled(
+                "No page loaded",
+                Style::default().fg(Color::DarkGray),
+            )]
+        };
+
+        let mut nav_spans = vec![
             Span::styled("[\u{25c0}]", back_style),
             Span::raw(" "),
             Span::styled("[\u{25b6}]", fwd_style),
+            Span::raw(" "),
+            Span::styled("[\u{21bb}]", reload_style),
             Span::raw("  "),
-            if let Some(url) = self.browser.url() {
-                Span::styled(url.to_string(), Style::default().fg(Color::DarkGray))
-            } else {
-                Span::styled("No page loaded", Style::default().fg(Color::DarkGray))
-            },
-        ]);
+        ];
+        nav_spans.extend(url_span);
+
+        let nav_bar = Line::from(nav_spans);
 
         self.last_back_btn_area = Rect::new(inner.x, inner.y, 3, 1);
         self.last_fwd_btn_area = Rect::new(inner.x + 4, inner.y, 3, 1);
+        self.last_reload_btn_area = Rect::new(inner.x + 8, inner.y, 3, 1);
 
         let url_area = Rect::new(inner.x, inner.y, inner.width, 1);
         Paragraph::new(nav_bar).render(url_area, buf);

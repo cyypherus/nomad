@@ -1,5 +1,5 @@
 use crate::network::NodeInfo;
-use micronaut::{Browser, BrowserWidget, InputResult, Link, RatatuiRenderer};
+use micronaut::{Browser, BrowserWidget, Interaction, Link, RatatuiRenderer};
 use ratatui::{
     buffer::Buffer,
     layout::{Constraint, Layout, Rect},
@@ -163,7 +163,7 @@ impl NetworkView {
 
     pub fn resolve_link(&self, link: &Link) -> Option<(NodeInfo, String, HashMap<String, String>)> {
         let link_url = &link.url;
-        
+
         if let Some(rest) = link_url.strip_prefix(':') {
             if let Some(ref node) = self.current_node {
                 let path = if rest.starts_with('/') {
@@ -240,7 +240,8 @@ impl NetworkView {
     }
 
     pub fn browser_scroll_page_up(&mut self) {
-        self.browser.scroll_by(-(self.last_content_area.height as i32));
+        self.browser
+            .scroll_by(-(self.last_content_area.height as i32));
     }
 
     pub fn browser_scroll_page_down(&mut self) {
@@ -255,7 +256,7 @@ impl NetworkView {
         self.browser.select_prev();
     }
 
-    pub fn browser_interact(&mut self) -> Option<Link> {
+    pub fn browser_interact(&mut self) -> Option<Interaction> {
         self.browser.interact()
     }
 
@@ -267,7 +268,7 @@ impl NetworkView {
         self.browser.forward()
     }
 
-    pub fn browser_click(&mut self, x: u16, y: u16) -> Option<Link> {
+    pub fn browser_click(&mut self, x: u16, y: u16) -> Option<Interaction> {
         let area = self.last_content_area;
         if x >= area.x && x < area.x + area.width && y >= area.y && y < area.y + area.height {
             let rel_x = x - area.x;
@@ -278,20 +279,8 @@ impl NetworkView {
         }
     }
 
-    pub fn browser_handle_char(&mut self, c: char) -> InputResult {
-        self.browser.input_char(c)
-    }
-
-    pub fn browser_handle_backspace(&mut self) -> InputResult {
-        self.browser.input_backspace()
-    }
-
-    pub fn browser_cancel_edit(&mut self) {
-        self.browser.cancel_edit();
-    }
-
-    pub fn browser_is_editing(&self) -> bool {
-        self.browser.is_editing()
+    pub fn browser_set_field(&mut self, name: &str, value: String) {
+        self.browser.set_field_value(name, value);
     }
 
     fn render_left_panel(&mut self, area: Rect, buf: &mut Buffer) {

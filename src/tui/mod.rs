@@ -3,6 +3,7 @@ mod browser_view;
 mod conversations;
 mod directory;
 mod discovery;
+mod modal;
 mod mynode;
 mod network;
 mod saved;
