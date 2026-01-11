@@ -23,6 +23,8 @@ pub struct Config {
 pub struct NetworkConfig {
     pub testnet: String,
     pub custom_interface: Option<String>,
+    #[serde(default)]
+    pub relay: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,6 +38,7 @@ impl Default for NetworkConfig {
         Self {
             testnet: "reticulum.qortal.link:4242".to_string(),
             custom_interface: None,
+            relay: false,
         }
     }
 }

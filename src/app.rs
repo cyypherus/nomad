@@ -42,7 +42,11 @@ impl NomadApp {
 
         log::info!("Identity loaded");
 
-        let transport_config = TransportConfig::new("nomad", identity.inner().inner(), false);
+        let mut transport_config = TransportConfig::new("nomad", identity.inner().inner(), false);
+        if config.network.relay {
+            transport_config.set_retransmit(true);
+            log::info!("Transport relay enabled - retransmitting announces and forwarding packets");
+        }
         let transport = Arc::new(Mutex::new(Transport::new(transport_config)));
 
         let mut node = LxmfNode::new(identity.into_inner(), transport.clone());
