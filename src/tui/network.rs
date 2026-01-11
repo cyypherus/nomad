@@ -1,3 +1,4 @@
+use crate::network::NodeInfo;
 use ratatui::{
     buffer::Buffer,
     layout::{Constraint, Layout, Rect},
@@ -5,81 +6,6 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, Paragraph, Widget, Wrap},
 };
-use serde::{Deserialize, Serialize};
-use std::fs;
-use std::path::Path;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SavedNode {
-    #[serde(with = "hex_bytes_16")]
-    pub hash: [u8; 16],
-    pub name: String,
-    #[serde(with = "hex_bytes_32")]
-    pub public_key: [u8; 32],
-    #[serde(with = "hex_bytes_32")]
-    pub verifying_key: [u8; 32],
-}
-
-mod hex_bytes_16 {
-    use serde::{Deserialize, Deserializer, Serializer};
-
-    pub fn serialize<S>(bytes: &[u8; 16], serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(&hex::encode(bytes))
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<[u8; 16], D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let s = String::deserialize(deserializer)?;
-        let bytes = hex::decode(&s).map_err(serde::de::Error::custom)?;
-        let mut arr = [0u8; 16];
-        if bytes.len() != 16 {
-            return Err(serde::de::Error::custom("expected 16 bytes"));
-        }
-        arr.copy_from_slice(&bytes);
-        Ok(arr)
-    }
-}
-
-mod hex_bytes_32 {
-    use serde::{Deserialize, Deserializer, Serializer};
-
-    pub fn serialize<S>(bytes: &[u8; 32], serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(&hex::encode(bytes))
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<[u8; 32], D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let s = String::deserialize(deserializer)?;
-        let bytes = hex::decode(&s).map_err(serde::de::Error::custom)?;
-        let mut arr = [0u8; 32];
-        if bytes.len() != 32 {
-            return Err(serde::de::Error::custom("expected 32 bytes"));
-        }
-        arr.copy_from_slice(&bytes);
-        Ok(arr)
-    }
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-struct NodesFile {
-    nodes: Vec<SavedNode>,
-}
-
-#[derive(Debug, Clone)]
-pub struct AnnounceEntry {
-    pub hash: [u8; 16],
-    pub name: Option<String>,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
@@ -89,7 +15,6 @@ pub enum ViewerState {
     Retrieving,
     Connected,
     Failed,
-    TimedOut,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,8 +24,8 @@ pub enum LeftPanelMode {
 }
 
 pub struct NetworkView {
-    saved_nodes: Vec<SavedNode>,
-    announces: Vec<AnnounceEntry>,
+    nodes: Vec<NodeInfo>,
+    announces: Vec<NodeInfo>,
     selected: usize,
     left_mode: LeftPanelMode,
 
@@ -116,10 +41,9 @@ pub struct NetworkView {
 }
 
 impl NetworkView {
-    pub fn new(our_lxmf_addr: [u8; 16]) -> Self {
-        let saved_nodes = Self::load_nodes().unwrap_or_default();
+    pub fn new(our_lxmf_addr: [u8; 16], nodes: Vec<NodeInfo>) -> Self {
         Self {
-            saved_nodes,
+            nodes,
             announces: Vec::new(),
             selected: 0,
             left_mode: LeftPanelMode::Nodes,
@@ -134,58 +58,19 @@ impl NetworkView {
         }
     }
 
-    fn nodes_path() -> std::path::PathBuf {
-        Path::new(".nomad").join("nodes.toml")
-    }
-
-    fn load_nodes() -> Option<Vec<SavedNode>> {
-        let path = Self::nodes_path();
-        let contents = fs::read_to_string(&path).ok()?;
-        let file: NodesFile = toml::from_str(&contents).ok()?;
-        Some(file.nodes)
-    }
-
-    fn save_nodes(&self) {
-        let file = NodesFile {
-            nodes: self.saved_nodes.clone(),
-        };
-        if let Ok(contents) = toml::to_string_pretty(&file) {
-            let _ = fs::write(Self::nodes_path(), contents);
-        }
-    }
-
-    pub fn add_announce(
-        &mut self,
-        hash: [u8; 16],
-        name: Option<String>,
-        public_key: [u8; 32],
-        verifying_key: [u8; 32],
-    ) {
-        if let Some(existing) = self.announces.iter_mut().find(|a| a.hash == hash) {
-            if name.is_some() {
-                existing.name = name.clone();
-            }
+    pub fn add_node(&mut self, node: NodeInfo) {
+        if let Some(existing) = self.announces.iter_mut().find(|n| n.hash == node.hash) {
+            existing.name = node.name.clone();
+            existing.identity = node.identity.clone();
         } else {
-            self.announces.push(AnnounceEntry {
-                hash,
-                name: name.clone(),
-            });
+            self.announces.push(node.clone());
         }
 
-        if let Some(node_name) = name {
-            if let Some(existing) = self.saved_nodes.iter_mut().find(|n| n.hash == hash) {
-                existing.name = node_name;
-                existing.public_key = public_key;
-                existing.verifying_key = verifying_key;
-            } else {
-                self.saved_nodes.push(SavedNode {
-                    hash,
-                    name: node_name,
-                    public_key,
-                    verifying_key,
-                });
-            }
-            self.save_nodes();
+        if let Some(existing) = self.nodes.iter_mut().find(|n| n.hash == node.hash) {
+            existing.name = node.name;
+            existing.identity = node.identity;
+        } else {
+            self.nodes.push(node);
         }
     }
 
@@ -213,7 +98,7 @@ impl NetworkView {
 
     fn current_list_len(&self) -> usize {
         match self.left_mode {
-            LeftPanelMode::Nodes => self.saved_nodes.len(),
+            LeftPanelMode::Nodes => self.nodes.len(),
             LeftPanelMode::Announces => self.announces.len(),
         }
     }
@@ -227,36 +112,26 @@ impl NetworkView {
     }
 
     pub fn update_announce_time(&mut self) {
-        self.last_announce_secs = 0;
+        self.last_announce_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
     }
 
-    pub fn connect_selected(
-        &mut self,
-    ) -> Option<([u8; 16], String, Option<[u8; 32]>, Option<[u8; 32]>)> {
-        let (hash, name, public_key, verifying_key) = match self.left_mode {
-            LeftPanelMode::Nodes => {
-                let node = self.saved_nodes.get(self.selected)?;
-                (
-                    node.hash,
-                    Some(node.name.clone()),
-                    Some(node.public_key),
-                    Some(node.verifying_key),
-                )
-            }
-            LeftPanelMode::Announces => {
-                let entry = self.announces.get(self.selected)?;
-                (entry.hash, entry.name.clone(), None, None)
-            }
+    pub fn connect_selected(&mut self) -> Option<(NodeInfo, String)> {
+        let node = match self.left_mode {
+            LeftPanelMode::Nodes => self.nodes.get(self.selected)?.clone(),
+            LeftPanelMode::Announces => self.announces.get(self.selected)?.clone(),
         };
 
         let path = "/page/index.mu".to_string();
-        self.current_node_name = name;
-        self.current_url = Some(format!("{}:{}", hex::encode(hash), path));
+        self.current_node_name = Some(node.name.clone());
+        self.current_url = Some(format!("{}:{}", node.hash_hex(), path));
         self.viewer_state = ViewerState::Connecting;
         self.status_message = Some("Connecting...".to_string());
         self.page_content = None;
 
-        Some((hash, path, public_key, verifying_key))
+        Some((node, path))
     }
 
     pub fn set_page_content(&mut self, url: String, content: String) {
@@ -275,13 +150,11 @@ impl NetworkView {
     }
 
     pub fn set_retrieving(&mut self) {
-        if self.viewer_state == ViewerState::Connecting {
-            self.viewer_state = ViewerState::Retrieving;
-            self.status_message = Some("Retrieving page...".to_string());
-        }
+        self.viewer_state = ViewerState::Retrieving;
+        self.status_message = Some("Retrieving page...".to_string());
     }
 
-    fn render_saved_nodes(&self, area: Rect, buf: &mut Buffer) {
+    fn render_left_panel(&self, area: Rect, buf: &mut Buffer) {
         let title = match self.left_mode {
             LeftPanelMode::Nodes => "Saved Nodes",
             LeftPanelMode::Announces => "Announces",
@@ -289,114 +162,60 @@ impl NetworkView {
 
         let items: Vec<ListItem> = match self.left_mode {
             LeftPanelMode::Nodes => self
-                .saved_nodes
+                .nodes
                 .iter()
                 .enumerate()
                 .map(|(i, node)| {
                     let style = if i == self.selected {
                         Style::default()
-                            .bg(Color::DarkGray)
+                            .fg(Color::Yellow)
                             .add_modifier(Modifier::BOLD)
                     } else {
                         Style::default()
                     };
-                    ListItem::new(Line::from(vec![
-                        Span::styled("Ⓝ  ", Style::default().fg(Color::Cyan)),
-                        Span::raw(&node.name),
-                    ]))
-                    .style(style)
+                    ListItem::new(format!("\u{24c3}  {}", node.name)).style(style)
                 })
                 .collect(),
             LeftPanelMode::Announces => self
                 .announces
                 .iter()
                 .enumerate()
-                .map(|(i, entry)| {
+                .map(|(i, node)| {
                     let style = if i == self.selected {
                         Style::default()
-                            .bg(Color::DarkGray)
+                            .fg(Color::Yellow)
                             .add_modifier(Modifier::BOLD)
                     } else {
                         Style::default()
                     };
-                    let display = match &entry.name {
-                        Some(name) => name.clone(),
-                        None => {
-                            let hash_str = hex::encode(entry.hash);
-                            hash_str[..16].to_string()
-                        }
-                    };
-                    ListItem::new(Line::from(vec![
-                        Span::styled("Ⓝ  ", Style::default().fg(Color::Yellow)),
-                        Span::raw(display),
-                    ]))
-                    .style(style)
+                    ListItem::new(format!("\u{24c3}  {}", node.name)).style(style)
                 })
                 .collect(),
         };
 
-        let list = if items.is_empty() {
-            let msg = match self.left_mode {
-                LeftPanelMode::Nodes => "No saved nodes",
-                LeftPanelMode::Announces => "No announces yet...",
-            };
-            List::new(vec![ListItem::new(msg)])
-                .block(Block::default().borders(Borders::ALL).title(title))
-                .style(Style::default().fg(Color::DarkGray))
-        } else {
-            List::new(items).block(Block::default().borders(Borders::ALL).title(title))
-        };
+        let list = List::new(items).block(
+            Block::default()
+                .title(title)
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::DarkGray)),
+        );
 
-        list.render(area, buf);
-    }
-
-    fn render_local_info(&self, area: Rect, buf: &mut Buffer) {
-        let announce_ago = if self.last_announce_secs == 0 {
-            "never".to_string()
-        } else if self.last_announce_secs < 60 {
-            format!("{} seconds ago", self.last_announce_secs)
-        } else {
-            format!("{} minutes ago", self.last_announce_secs / 60)
-        };
-
-        let text = vec![
-            Line::from(vec![
-                Span::raw("LXMF Addr : <"),
-                Span::styled(
-                    hex::encode(self.our_lxmf_addr),
-                    Style::default().fg(Color::Cyan),
-                ),
-                Span::raw(">"),
-            ]),
-            Line::from(vec![Span::raw("Name      : "), Span::raw(&self.our_name)]),
-            Line::from("┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄"),
-            Line::from(vec![Span::raw("Announced : "), Span::raw(announce_ago)]),
-            Line::from(vec![
-                Span::styled(
-                    "< Announce Now",
-                    Style::default().fg(Color::White).bg(Color::DarkGray),
-                ),
-                Span::raw(" >"),
-            ]),
-        ];
-
-        let para = Paragraph::new(text)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title("Local Peer Info"),
-            )
-            .wrap(Wrap { trim: false });
-
-        para.render(area, buf);
+        Widget::render(list, area, buf);
     }
 
     fn render_viewer(&self, area: Rect, buf: &mut Buffer) {
-        let title = self.current_node_name.as_deref().unwrap_or("Remote Node");
+        let title = self
+            .current_node_name
+            .clone()
+            .unwrap_or_else(|| "Remote Node".to_string());
 
-        let block = Block::default().borders(Borders::ALL).title(title);
+        let block = Block::default()
+            .title(title)
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::DarkGray));
+
         let inner = block.inner(area);
-        block.render(area, buf);
+        Widget::render(block, area, buf);
 
         if inner.height < 3 {
             return;
@@ -404,123 +223,174 @@ impl NetworkView {
 
         let url_line = if let Some(url) = &self.current_url {
             Line::from(vec![
-                Span::styled("Ⓝ  ", Style::default().fg(Color::Cyan)),
-                Span::raw(url.as_str()),
+                Span::styled("\u{24c3}  ", Style::default().fg(Color::Cyan)),
+                Span::raw(url),
             ])
         } else {
-            Line::from("")
+            Line::raw("")
         };
 
-        let url_para = Paragraph::new(url_line);
-        let url_area = Rect::new(inner.x, inner.y, inner.width, 1);
-        url_para.render(url_area, buf);
+        let url_area = Rect {
+            x: inner.x,
+            y: inner.y,
+            width: inner.width,
+            height: 1,
+        };
+        Paragraph::new(url_line).render(url_area, buf);
 
-        let divider = "┄".repeat(inner.width as usize);
-        let divider_area = Rect::new(inner.x, inner.y + 1, inner.width, 1);
-        Paragraph::new(divider).render(divider_area, buf);
+        let divider_area = Rect {
+            x: inner.x,
+            y: inner.y + 1,
+            width: inner.width,
+            height: 1,
+        };
+        Paragraph::new("\u{2504}".repeat(inner.width as usize)).render(divider_area, buf);
 
-        let content_area = Rect::new(
-            inner.x,
-            inner.y + 2,
-            inner.width,
-            inner.height.saturating_sub(2),
-        );
+        let content_area = Rect {
+            x: inner.x,
+            y: inner.y + 2,
+            width: inner.width,
+            height: inner.height.saturating_sub(2),
+        };
 
-        let content: Vec<Line> = match self.viewer_state {
+        match self.viewer_state {
             ViewerState::Disconnected => {
-                vec![
-                    Line::from(""),
-                    Line::from(""),
-                    Line::from(Span::styled(
+                let msg = Paragraph::new(vec![
+                    Line::raw(""),
+                    Line::raw(""),
+                    Line::styled(
                         "Disconnected",
+                        Style::default()
+                            .fg(Color::DarkGray)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Line::styled(
+                        "  \u{2190}  \u{2192}  ",
                         Style::default().fg(Color::DarkGray),
-                    )),
-                    Line::from(Span::styled("←  →", Style::default().fg(Color::DarkGray))),
-                ]
+                    ),
+                ])
+                .alignment(ratatui::layout::Alignment::Center);
+                Widget::render(msg, content_area, buf);
             }
-            ViewerState::Connecting => {
-                vec![
-                    Line::from(""),
-                    Line::from(Span::styled(
-                        "Connecting...",
-                        Style::default().fg(Color::Yellow),
-                    )),
-                ]
-            }
-            ViewerState::Retrieving => {
-                vec![
-                    Line::from(""),
-                    Line::from(Span::styled(
-                        "Retrieving",
-                        Style::default().fg(Color::Yellow),
-                    )),
-                    Line::from(format!("[{}]", self.current_url.as_deref().unwrap_or(""))),
-                ]
+            ViewerState::Connecting | ViewerState::Retrieving => {
+                let status = self
+                    .status_message
+                    .clone()
+                    .unwrap_or_else(|| "Connecting...".to_string());
+                let msg = Paragraph::new(vec![
+                    Line::raw(""),
+                    Line::raw(""),
+                    Line::styled(
+                        "\u{25cf}",
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::SLOW_BLINK),
+                    ),
+                    Line::raw(""),
+                    Line::styled(status, Style::default().fg(Color::Yellow)),
+                ])
+                .alignment(ratatui::layout::Alignment::Center);
+                Widget::render(msg, content_area, buf);
             }
             ViewerState::Connected => {
                 if let Some(content) = &self.page_content {
-                    content.lines().map(|l| Line::from(l.to_string())).collect()
-                } else {
-                    vec![Line::from("(empty page)")]
+                    let doc = micron::parse(content);
+                    let rendered = micron::render(&doc, &Default::default());
+                    let paragraph = Paragraph::new(rendered).wrap(Wrap { trim: false });
+                    Widget::render(paragraph, content_area, buf);
                 }
             }
             ViewerState::Failed => {
-                vec![
-                    Line::from(""),
-                    Line::from(Span::styled(
-                        "!",
-                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-                    )),
-                    Line::from(""),
-                    Line::from(Span::styled(
-                        "Request failed",
-                        Style::default().fg(Color::Red),
-                    )),
-                ]
-            }
-            ViewerState::TimedOut => {
-                vec![
-                    Line::from(""),
-                    Line::from(Span::styled(
-                        "!",
-                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-                    )),
-                    Line::from(""),
-                    Line::from(Span::styled(
-                        "Request timed out",
-                        Style::default().fg(Color::Red),
-                    )),
-                ]
-            }
-        };
-
-        let para = Paragraph::new(content).alignment(ratatui::layout::Alignment::Center);
-        para.render(content_area, buf);
-
-        if let Some(msg) = &self.status_message {
-            if content_area.height > 0 {
-                let status_y = content_area.y + content_area.height - 1;
-                let status_area = Rect::new(content_area.x, status_y, content_area.width, 1);
-                let divider = "┄".repeat(content_area.width as usize);
-                Paragraph::new(divider).render(status_area, buf);
-                if status_y > content_area.y {
-                    let msg_area = Rect::new(content_area.x, status_y, content_area.width, 1);
-                    Paragraph::new(msg.as_str()).render(msg_area, buf);
-                }
+                let reason = self
+                    .status_message
+                    .clone()
+                    .unwrap_or_else(|| "Unknown error".to_string());
+                let msg = Paragraph::new(vec![
+                    Line::raw(""),
+                    Line::raw(""),
+                    Line::styled("!", Style::default().fg(Color::Red)),
+                    Line::raw(""),
+                    Line::styled("Request failed", Style::default().fg(Color::Red)),
+                    Line::raw(""),
+                    Line::styled(reason, Style::default().fg(Color::DarkGray)),
+                ])
+                .alignment(ratatui::layout::Alignment::Center);
+                Widget::render(msg, content_area, buf);
             }
         }
+    }
+
+    fn render_local_info(&self, area: Rect, buf: &mut Buffer) {
+        let addr_hex = hex::encode(self.our_lxmf_addr);
+
+        let announce_status = if self.last_announce_secs > 0 {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let elapsed = now.saturating_sub(self.last_announce_secs);
+            if elapsed < 60 {
+                format!("{}s ago", elapsed)
+            } else if elapsed < 3600 {
+                format!("{}m ago", elapsed / 60)
+            } else {
+                format!("{}h ago", elapsed / 3600)
+            }
+        } else {
+            "never".to_string()
+        };
+
+        let info = vec![
+            Line::from(vec![Span::styled(
+                "LXMF Addr : ",
+                Style::default().fg(Color::DarkGray),
+            )]),
+            Line::from(vec![Span::styled(
+                format!("<{}>", addr_hex),
+                Style::default().fg(Color::Cyan),
+            )]),
+            Line::from(vec![
+                Span::styled("Name      : ", Style::default().fg(Color::DarkGray)),
+                Span::raw(&self.our_name),
+            ]),
+            Line::raw("\u{2504}".repeat(34)),
+            Line::raw("\u{2504}".repeat(12)),
+            Line::from(vec![
+                Span::styled("Announced : ", Style::default().fg(Color::DarkGray)),
+                Span::raw(announce_status),
+            ]),
+            Line::styled(
+                "< Announce Now >",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ];
+
+        let paragraph = Paragraph::new(info).block(
+            Block::default()
+                .title("Local Peer Info")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::DarkGray)),
+        );
+
+        Widget::render(paragraph, area, buf);
     }
 }
 
 impl Widget for &NetworkView {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let chunks = Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)])
+        let chunks = Layout::default()
+            .direction(ratatui::layout::Direction::Horizontal)
+            .constraints([Constraint::Length(36), Constraint::Min(20)])
             .split(area);
 
-        let left_chunks =
-            Layout::vertical([Constraint::Min(8), Constraint::Length(9)]).split(chunks[0]);
+        let left_chunks = Layout::default()
+            .direction(ratatui::layout::Direction::Vertical)
+            .constraints([Constraint::Min(10), Constraint::Length(10)])
+            .split(chunks[0]);
 
-        self.render_saved_nodes(left_chunks[0], buf);
+        self.render_left_panel(left_chunks[0], buf);
         self.render_local_info(left_chunks[1], buf);
         self.render_viewer(chunks[1], buf);
     }

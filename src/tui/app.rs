@@ -26,26 +26,17 @@ use super::tabs::{Tab, TabBar};
 
 #[derive(Debug, Clone)]
 pub enum NetworkEvent {
-    AnnounceReceived {
-        hash: [u8; 16],
-        name: Option<String>,
-        public_key: [u8; 32],
-        verifying_key: [u8; 32],
-    },
+    NodeAnnounce(NodeInfo),
     AnnounceSent,
     Status(String),
     MessageReceived([u8; DESTINATION_LENGTH]),
     ConversationsUpdated(Vec<ConversationInfo>),
     MessagesLoaded(Vec<StoredMessage>),
-    PageReceived {
-        url: String,
-        content: String,
-    },
-    ConnectionFailed {
-        url: String,
-        reason: String,
-    },
+    PageReceived { url: String, content: String },
+    PageFailed { url: String, reason: String },
 }
+
+use crate::network::NodeInfo;
 
 #[derive(Debug, Clone)]
 pub enum TuiCommand {
@@ -57,11 +48,9 @@ pub enum TuiCommand {
         destination: [u8; DESTINATION_LENGTH],
     },
     MarkConversationRead([u8; DESTINATION_LENGTH]),
-    ConnectToNode {
-        hash: [u8; 16],
+    FetchPage {
+        node: NodeInfo,
         path: String,
-        public_key: Option<[u8; 32]>,
-        verifying_key: Option<[u8; 32]>,
     },
 }
 
@@ -83,6 +72,7 @@ pub struct TuiApp {
 impl TuiApp {
     pub fn new(
         dest_hash: [u8; 16],
+        initial_nodes: Vec<NodeInfo>,
         event_rx: mpsc::Receiver<NetworkEvent>,
         cmd_tx: mpsc::Sender<TuiCommand>,
     ) -> io::Result<Self> {
@@ -100,7 +90,7 @@ impl TuiApp {
             running: true,
             tab: Tab::default(),
             conversations: ConversationsView::new(),
-            network: NetworkView::new(dest_hash),
+            network: NetworkView::new(dest_hash, initial_nodes),
             event_rx,
             cmd_tx,
             status_message: None,
@@ -123,16 +113,10 @@ impl TuiApp {
     fn poll_events(&mut self) {
         while let Ok(event) = self.event_rx.try_recv() {
             match event {
-                NetworkEvent::AnnounceReceived {
-                    hash,
-                    name,
-                    public_key,
-                    verifying_key,
-                } => {
-                    self.network
-                        .add_announce(hash, name, public_key, verifying_key);
+                NetworkEvent::NodeAnnounce(node) => {
+                    self.network.add_node(node);
                     self.announces_received += 1;
-                    self.set_status("Announce received");
+                    self.set_status("Node announce received");
                 }
                 NetworkEvent::AnnounceSent => {
                     self.announces_sent += 1;
@@ -144,7 +128,7 @@ impl TuiApp {
                 NetworkEvent::PageReceived { url, content } => {
                     self.network.set_page_content(url, content);
                 }
-                NetworkEvent::ConnectionFailed { url, reason } => {
+                NetworkEvent::PageFailed { url, reason } => {
                     self.network.set_connection_failed(url, reason);
                 }
                 NetworkEvent::MessageReceived(peer) => {
@@ -391,15 +375,10 @@ impl TuiApp {
                 }
             }
             Tab::Network => {
-                if let Some((hash, path, public_key, verifying_key)) =
-                    self.network.connect_selected()
-                {
-                    let _ = self.cmd_tx.blocking_send(TuiCommand::ConnectToNode {
-                        hash,
-                        path,
-                        public_key,
-                        verifying_key,
-                    });
+                if let Some((node, path)) = self.network.connect_selected() {
+                    let _ = self
+                        .cmd_tx
+                        .blocking_send(TuiCommand::FetchPage { node, path });
                 }
             }
         }
