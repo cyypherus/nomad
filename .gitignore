@@ -1,3 +1,9 @@
-/target
-Cargo.lock
+target/
+pkg/
+**/*.rs.bk
+dist/
+traces/
+*.DS_Store
+.cargo/
 .nomad/
+Cargo.lock
