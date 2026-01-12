@@ -32,6 +32,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
 
     let transport = nomad.lock().await.transport().clone();
+    let relay_enabled = nomad.lock().await.relay_enabled();
     let registry = NodeRegistry::new(".nomad/nodes.toml");
     let initial_nodes: Vec<_> = registry.all().into_iter().cloned().collect();
     let network_client = Arc::new(NetworkClient::new(transport.clone(), registry));
@@ -45,9 +46,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut announce_rx = app.announce_events().await;
         let mut data_rx = app.received_data_events().await;
         let testnet = app.testnet_address().to_string();
+        let stats = app.stats().clone();
         drop(app);
 
         let mut node_announces = network_client_clone.node_announces();
+        let mut stats_interval = tokio::time::interval(std::time::Duration::from_secs(1));
 
         log::info!("Network task started, connected to {}", testnet);
         let _ = event_tx_clone
@@ -177,12 +180,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                 }
+                _ = stats_interval.tick() => {
+                    let snapshot = stats.snapshot();
+                    let _ = event_tx_clone.send(NetworkEvent::RelayStats(snapshot)).await;
+                }
             }
         }
     });
 
     let tui_result = tokio::task::spawn_blocking(move || {
-        let mut tui = TuiApp::new(dest_hash, initial_nodes, event_rx, cmd_tx)?;
+        let mut tui = TuiApp::new(dest_hash, initial_nodes, relay_enabled, event_rx, cmd_tx)?;
         tui.run()
     })
     .await?;

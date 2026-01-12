@@ -2,6 +2,7 @@ use lxmf::{
     ConversationInfo, LxMessage, LxmfNode, StorageError, StoredMessage, DESTINATION_LENGTH,
 };
 use reticulum::iface::tcp_client::TcpClient;
+use reticulum::iface::RxMessage;
 use reticulum::transport::{AnnounceEvent, ReceivedData};
 use reticulum::transport::{Transport, TransportConfig};
 use std::sync::Arc;
@@ -11,6 +12,7 @@ use tokio::sync::Mutex;
 use crate::config::{Config, ConfigError};
 use crate::conversation::{ConversationManager, SqliteStorage};
 use crate::identity::{Identity, IdentityError};
+use reticulum::transport::TransportStats;
 
 #[derive(Error, Debug)]
 pub enum AppError {
@@ -33,6 +35,8 @@ pub struct NomadApp {
     node: LxmfNode,
     dest_hash: [u8; 16],
     conversations: ConversationManager<SqliteStorage>,
+    relay_enabled: bool,
+    stats: Arc<TransportStats>,
 }
 
 impl NomadApp {
@@ -42,12 +46,15 @@ impl NomadApp {
 
         log::info!("Identity loaded");
 
+        let relay_enabled = config.network.relay;
         let mut transport_config = TransportConfig::new("nomad", identity.inner().inner(), false);
-        if config.network.relay {
+        if relay_enabled {
             transport_config.set_retransmit(true);
             log::info!("Transport relay enabled - retransmitting announces and forwarding packets");
         }
-        let transport = Arc::new(Mutex::new(Transport::new(transport_config)));
+        let transport = Transport::new(transport_config);
+        let stats = transport.stats();
+        let transport = Arc::new(Mutex::new(transport));
 
         let mut node = LxmfNode::new(identity.into_inner(), transport.clone());
         let dest_hash = node.register_delivery_destination().await;
@@ -80,6 +87,8 @@ impl NomadApp {
             node,
             dest_hash,
             conversations,
+            relay_enabled,
+            stats,
         })
     }
 
@@ -89,6 +98,18 @@ impl NomadApp {
 
     pub fn testnet_address(&self) -> &str {
         &self.config.network.testnet
+    }
+
+    pub fn relay_enabled(&self) -> bool {
+        self.relay_enabled
+    }
+
+    pub fn stats(&self) -> &Arc<TransportStats> {
+        &self.stats
+    }
+
+    pub async fn iface_rx(&self) -> tokio::sync::broadcast::Receiver<RxMessage> {
+        self.transport.lock().await.iface_rx()
     }
 
     pub async fn announce_events(&self) -> tokio::sync::broadcast::Receiver<AnnounceEvent> {

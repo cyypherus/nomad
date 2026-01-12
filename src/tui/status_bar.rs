@@ -1,6 +1,7 @@
+use reticulum::transport::TransportStatsSnapshot;
 use ratatui::{
     buffer::Buffer,
-    layout::Rect,
+    layout::{Alignment, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Paragraph, Widget},
@@ -8,10 +9,9 @@ use ratatui::{
 use std::time::Instant;
 
 pub struct StatusBar {
-    announces_received: usize,
-    announces_sent: usize,
     status_message: Option<String>,
     status_time: Option<Instant>,
+    relay_stats: Option<TransportStatsSnapshot>,
 }
 
 impl Default for StatusBar {
@@ -23,24 +23,19 @@ impl Default for StatusBar {
 impl StatusBar {
     pub fn new() -> Self {
         Self {
-            announces_received: 0,
-            announces_sent: 0,
             status_message: None,
             status_time: None,
+            relay_stats: None,
         }
-    }
-
-    pub fn increment_received(&mut self) {
-        self.announces_received += 1;
-    }
-
-    pub fn increment_sent(&mut self) {
-        self.announces_sent += 1;
     }
 
     pub fn set_status(&mut self, msg: String) {
         self.status_message = Some(msg);
         self.status_time = Some(Instant::now());
+    }
+
+    pub fn set_relay_stats(&mut self, stats: TransportStatsSnapshot) {
+        self.relay_stats = Some(stats);
     }
 
     pub fn tick(&mut self) {
@@ -55,33 +50,42 @@ impl StatusBar {
 
 impl Widget for &StatusBar {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let mut spans = vec![Span::raw(" ")];
-
-        spans.push(Span::styled("\u{2193}", Style::default().fg(Color::Green)));
-        spans.push(Span::styled(
-            format!("{} ", self.announces_received),
-            Style::default().fg(Color::White),
-        ));
-
-        spans.push(Span::styled("\u{2191}", Style::default().fg(Color::Cyan)));
-        spans.push(Span::styled(
-            format!("{}", self.announces_sent),
-            Style::default().fg(Color::White),
-        ));
-
-        if let Some(ref msg) = self.status_message {
-            spans.push(Span::styled(" | ", Style::default().fg(Color::DarkGray)));
-            spans.push(Span::styled(
-                msg.clone(),
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ));
+        for x in area.x..area.x + area.width {
+            for y in area.y..area.y + area.height {
+                buf[(x, y)].set_bg(Color::Rgb(20, 20, 30));
+            }
         }
 
-        let line = Line::from(spans);
-        Paragraph::new(line)
-            .style(Style::default().bg(Color::Rgb(20, 20, 30)))
-            .render(area, buf);
+        if let Some(ref msg) = self.status_message {
+            let spans = vec![
+                Span::raw(" "),
+                Span::styled(
+                    msg.clone(),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ];
+            let line = Line::from(spans);
+            Paragraph::new(line).render(Rect::new(area.x, area.y, area.width, 1), buf);
+        }
+
+        if let Some(ref stats) = self.relay_stats {
+            if stats.packets_relayed > 0 || stats.announces_relayed > 0 {
+                let relay_line = Line::from(vec![
+                    Span::styled("\u{2191}\u{2193}", Style::default().fg(Color::Magenta)),
+                    Span::styled(
+                        format!(
+                            " {} ",
+                            TransportStatsSnapshot::format_bytes(stats.bytes_relayed)
+                        ),
+                        Style::default().fg(Color::White),
+                    ),
+                ]);
+                Paragraph::new(relay_line)
+                    .alignment(Alignment::Right)
+                    .render(Rect::new(area.x, area.y + 1, area.width, 1), buf);
+            }
+        }
     }
 }
