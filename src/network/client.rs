@@ -20,7 +20,7 @@ const PATH_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const LINK_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct NetworkClient {
-    transport: Arc<Mutex<Transport>>,
+    transport: Arc<Transport>,
     registry: Arc<RwLock<NodeRegistry>>,
     known_destinations: Arc<Mutex<HashMap<[u8; 16], DestinationDesc>>>,
     node_announce_tx: broadcast::Sender<NodeInfo>,
@@ -28,7 +28,7 @@ pub struct NetworkClient {
 }
 
 impl NetworkClient {
-    pub fn new(transport: Arc<Mutex<Transport>>, registry: NodeRegistry) -> Self {
+    pub fn new(transport: Arc<Transport>, registry: NodeRegistry) -> Self {
         let (node_announce_tx, _) = broadcast::channel(64);
         let (peer_announce_tx, _) = broadcast::channel(64);
 
@@ -49,30 +49,35 @@ impl NetworkClient {
         self.peer_announce_tx.subscribe()
     }
 
-    pub async fn handle_announce(&self, dest: &SingleOutputDestination, app_data: &[u8]) {
+    pub async fn handle_announce(
+        &self,
+        desc: DestinationDesc,
+        identity: reticulum::identity::Identity,
+        app_data: &[u8],
+    ) {
         let mut hash = [0u8; 16];
-        hash.copy_from_slice(dest.desc.address_hash.as_slice());
+        hash.copy_from_slice(desc.address_hash.as_slice());
 
         let mut public_key = [0u8; 32];
-        public_key.copy_from_slice(dest.identity.public_key_bytes());
+        public_key.copy_from_slice(identity.public_key_bytes());
 
         let mut verifying_key = [0u8; 32];
-        verifying_key.copy_from_slice(dest.identity.verifying_key.as_bytes());
+        verifying_key.copy_from_slice(identity.verifying_key.as_bytes());
 
-        let identity = IdentityInfo {
+        let identity_info = IdentityInfo {
             public_key,
             verifying_key,
         };
 
-        self.known_destinations.lock().await.insert(hash, dest.desc);
+        self.known_destinations.lock().await.insert(hash, desc);
 
-        if is_node_announce(dest) {
+        if is_node_announce_desc(&desc) {
             let name = parse_display_name(app_data).unwrap_or_else(|| "Unknown".into());
 
             let node = NodeInfo {
                 hash,
                 name: name.clone(),
-                identity,
+                identity: identity_info,
             };
 
             {
@@ -87,7 +92,7 @@ impl NetworkClient {
             let peer = PeerInfo {
                 hash,
                 name,
-                identity,
+                identity: identity_info,
             };
 
             let _ = self.peer_announce_tx.send(peer);
@@ -144,7 +149,7 @@ macro_rules! check_cancelled {
 }
 
 async fn fetch_page_inner(
-    transport: Arc<Mutex<Transport>>,
+    transport: Arc<Transport>,
     known_destinations: Arc<Mutex<HashMap<[u8; 16], DestinationDesc>>>,
     node: &NodeInfo,
     path: &str,
@@ -153,10 +158,15 @@ async fn fetch_page_inner(
 ) -> Result<(), String> {
     let address_hash = AddressHash::from_bytes(&node.hash);
 
-    let has_path = transport.lock().await.has_path(&address_hash).await;
+    log::debug!("fetch_page: checking has_path for {}", address_hash);
+    let has_path = transport.has_path(&address_hash).await;
+    log::debug!("fetch_page: has_path returned {}", has_path);
+
     if !has_path {
         handle.set_status(PageStatus::RequestingPath);
-        transport.lock().await.request_path(&address_hash).await;
+        log::debug!("fetch_page: requesting path");
+        transport.request_path(&address_hash).await;
+        log::debug!("fetch_page: request_path completed");
 
         handle.set_status(PageStatus::WaitingForAnnounce);
         let wait_result =
@@ -171,7 +181,7 @@ async fn fetch_page_inner(
 
     check_cancelled!(handle);
 
-    if let Some(hops) = transport.lock().await.path_hops(&address_hash).await {
+    if let Some(hops) = transport.path_hops(&address_hash).await {
         handle.set_status(PageStatus::PathFound { hops });
     }
 
@@ -184,13 +194,11 @@ async fn fetch_page_inner(
     check_cancelled!(handle);
     handle.set_status(PageStatus::Connecting);
 
-    let tp = transport.lock().await;
-    let mut link_events = tp.out_link_events();
-    let link = tp.link(dest_desc).await;
+    let mut link_events = transport.out_link_events();
+    let link = transport.link(dest_desc).await;
     let link_id = *link.lock().await.id();
     let already_active =
         link.lock().await.status() == reticulum::destination::link::LinkStatus::Active;
-    drop(tp);
 
     if !already_active {
         let link_result =
@@ -292,7 +300,7 @@ async fn fetch_page_inner(
                                 resource_manager.create_request_packet(&hash, &link_id, encrypt_fn)
                             {
                                 drop(link_guard);
-                                transport.lock().await.send_packet(request_packet).await;
+                                transport.send_packet(request_packet).await;
                             }
                         }
                         ResourceHandleResult::Assemble(hash) => {
@@ -306,7 +314,7 @@ async fn fetch_page_inner(
                                 resource_manager.assemble_and_prove(&hash, &link_id, decrypt_fn)
                             {
                                 drop(link_guard);
-                                transport.lock().await.send_packet(proof_packet).await;
+                                transport.send_packet(proof_packet).await;
 
                                 match parse_resource_content(&data) {
                                     Ok(content) => {
@@ -356,7 +364,7 @@ async fn fetch_page_inner(
 }
 
 async fn wait_for_path(
-    transport: &Arc<Mutex<Transport>>,
+    transport: &Arc<Transport>,
     address_hash: &AddressHash,
     handle: &PageRequestHandle,
     timeout_duration: Duration,
@@ -368,7 +376,7 @@ async fn wait_for_path(
         if handle.is_cancelled() {
             return false;
         }
-        if transport.lock().await.has_path(address_hash).await {
+        if transport.has_path(address_hash).await {
             return true;
         }
         tokio::time::sleep(check_interval).await;
@@ -415,7 +423,7 @@ async fn wait_for_link_activation(
 }
 
 async fn send_page_request(
-    transport: &Arc<Mutex<Transport>>,
+    transport: &Arc<Transport>,
     link: &Arc<Mutex<Link>>,
     path: &str,
     form_data: &std::collections::HashMap<String, String>,
@@ -454,7 +462,7 @@ async fn send_page_request(
     packet.context = PacketContext::Request;
     drop(link_guard);
 
-    transport.lock().await.send_packet(packet).await;
+    transport.send_packet(packet).await;
     Ok(())
 }
 
@@ -486,9 +494,9 @@ fn save_page_content(content: &str) {
     }
 }
 
-fn is_node_announce(dest: &SingleOutputDestination) -> bool {
+fn is_node_announce_desc(desc: &DestinationDesc) -> bool {
     let expected = DestinationName::new("nomadnetwork", "node");
-    dest.desc.name.as_name_hash_slice() == expected.as_name_hash_slice()
+    desc.name.as_name_hash_slice() == expected.as_name_hash_slice()
 }
 
 fn parse_display_name(app_data: &[u8]) -> Option<String> {

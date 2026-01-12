@@ -34,7 +34,7 @@ pub fn is_node_announce(dest: &SingleOutputDestination) -> bool {
 }
 
 pub struct NodeClient {
-    transport: Arc<Mutex<Transport>>,
+    transport: Arc<Transport>,
     known_nodes: Arc<Mutex<HashMap<[u8; 16], DestinationDesc>>>,
     pending: Arc<Mutex<HashMap<AddressHash, PendingRequest>>>,
     result_tx: mpsc::Sender<PageRequestResult>,
@@ -42,7 +42,7 @@ pub struct NodeClient {
 
 impl NodeClient {
     pub fn new(
-        transport: Arc<Mutex<Transport>>,
+        transport: Arc<Transport>,
         result_tx: mpsc::Sender<PageRequestResult>,
     ) -> Self {
         Self {
@@ -103,11 +103,9 @@ impl NodeClient {
 
         let url = format!("{}:{}", hex::encode(node_hash), path);
 
-        let transport = self.transport.lock().await;
-        let mut link_events = transport.out_link_events();
-        let link = transport.link(node_desc).await;
+        let mut link_events = self.transport.out_link_events();
+        let link = self.transport.link(node_desc).await;
         let link_id = *link.lock().await.id();
-        drop(transport);
 
         log::debug!("NodeClient: link {} created, subscribed to events", link_id);
 
@@ -253,7 +251,7 @@ impl NodeClient {
 }
 
 async fn send_page_request(
-    transport: &Arc<Mutex<Transport>>,
+    transport: &Arc<Transport>,
     link: &Arc<Mutex<reticulum::destination::link::Link>>,
     path: &str,
 ) -> Result<(), String> {
@@ -278,7 +276,7 @@ async fn send_page_request(
     packet.context = PacketContext::Request;
     drop(link_guard);
 
-    transport.lock().await.send_packet(packet).await;
+    transport.send_packet(packet).await;
     Ok(())
 }
 
@@ -303,7 +301,7 @@ async fn handle_resource_packet(
     context: PacketContext,
     data: &[u8],
     link: &Arc<Mutex<Link>>,
-    transport: &Arc<Mutex<Transport>>,
+    transport: &Arc<Transport>,
 ) -> Option<Vec<u8>> {
     let mut pending_guard = pending.lock().await;
     let req = pending_guard.get_mut(link_id)?;
@@ -395,7 +393,7 @@ async fn handle_resource_packet(
 
                 drop(link_guard);
                 drop(pending_guard);
-                transport.lock().await.send_packet(request_packet).await;
+                transport.send_packet(request_packet).await;
             }
             None
         }
@@ -407,7 +405,7 @@ async fn handle_resource_packet(
             {
                 drop(link_guard);
                 drop(pending_guard);
-                transport.lock().await.send_packet(proof_packet).await;
+                transport.send_packet(proof_packet).await;
                 Some(data)
             } else {
                 log::error!("NodeClient: failed to assemble resource {}", hash);

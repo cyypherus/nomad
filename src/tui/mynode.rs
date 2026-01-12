@@ -1,4 +1,3 @@
-use reticulum::transport::TransportStatsSnapshot;
 use ratatui::{
     buffer::Buffer,
     layout::{Constraint, Layout, Rect},
@@ -6,6 +5,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Widget},
 };
+use reticulum::transport::TransportStatsSnapshot;
 use std::collections::VecDeque;
 use std::time::{SystemTime, UNIX_EPOCH};
 

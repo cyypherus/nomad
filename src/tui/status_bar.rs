@@ -1,4 +1,3 @@
-use reticulum::transport::TransportStatsSnapshot;
 use ratatui::{
     buffer::Buffer,
     layout::{Alignment, Rect},
@@ -6,6 +5,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Paragraph, Widget},
 };
+use reticulum::transport::TransportStatsSnapshot;
 use std::time::Instant;
 
 pub struct StatusBar {

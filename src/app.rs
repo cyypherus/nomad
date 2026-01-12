@@ -31,7 +31,7 @@ pub enum AppError {
 pub struct NomadApp {
     #[allow(dead_code)]
     config: Config,
-    transport: Arc<Mutex<Transport>>,
+    transport: Arc<Transport>,
     node: LxmfNode,
     dest_hash: [u8; 16],
     conversations: ConversationManager<SqliteStorage>,
@@ -54,7 +54,7 @@ impl NomadApp {
         }
         let transport = Transport::new(transport_config);
         let stats = transport.stats();
-        let transport = Arc::new(Mutex::new(transport));
+        let transport = Arc::new(transport);
 
         let mut node = LxmfNode::new(identity.into_inner(), transport.clone());
         let dest_hash = node.register_delivery_destination().await;
@@ -76,13 +76,13 @@ impl NomadApp {
             let addr = iface_config.address();
             log::info!("Connecting to {} ({})", name, addr);
 
-            transport
-                .lock()
-                .await
-                .iface_manager()
-                .lock()
-                .await
-                .spawn(TcpClient::new(&addr), TcpClient::spawn);
+            let iface_manager = transport.iface_manager();
+            iface_manager.lock().await.spawn(
+                TcpClient::new(&addr),
+                addr,
+                iface_manager.clone(),
+                TcpClient::spawn,
+            );
         }
 
         if !enabled_interfaces.is_empty() {
@@ -105,14 +105,6 @@ impl NomadApp {
         self.dest_hash
     }
 
-    pub fn connected_interfaces(&self) -> Vec<String> {
-        self.config
-            .enabled_interfaces()
-            .iter()
-            .map(|(name, iface)| format!("{} ({})", name, iface.address()))
-            .collect()
-    }
-
     pub fn relay_enabled(&self) -> bool {
         self.relay_enabled
     }
@@ -121,20 +113,26 @@ impl NomadApp {
         &self.stats
     }
 
-    pub async fn iface_rx(&self) -> tokio::sync::broadcast::Receiver<RxMessage> {
-        self.transport.lock().await.iface_rx()
+    pub fn iface_rx(&self) -> tokio::sync::broadcast::Receiver<RxMessage> {
+        self.transport.iface_rx()
     }
 
-    pub async fn announce_events(&self) -> tokio::sync::broadcast::Receiver<AnnounceEvent> {
-        self.node.announce_events().await
+    pub fn announce_events(&self) -> tokio::sync::broadcast::Receiver<AnnounceEvent> {
+        self.node.announce_events()
     }
 
-    pub async fn received_data_events(&self) -> tokio::sync::broadcast::Receiver<ReceivedData> {
-        self.node.received_data_events().await
+    pub fn received_data_events(&self) -> tokio::sync::broadcast::Receiver<ReceivedData> {
+        self.node.received_data_events()
     }
 
     pub async fn announce(&self) {
         self.node.announce().await;
+    }
+
+    pub fn delivery_destination(
+        &self,
+    ) -> Option<Arc<Mutex<reticulum::destination::SingleInputDestination>>> {
+        self.node.delivery_destination()
     }
 
     pub async fn handle_announce(&mut self, event: &AnnounceEvent) {
@@ -186,7 +184,7 @@ impl NomadApp {
         self.conversations.mark_conversation_read(peer)
     }
 
-    pub fn transport(&self) -> &Arc<Mutex<Transport>> {
+    pub fn transport(&self) -> &Arc<Transport> {
         &self.transport
     }
 }

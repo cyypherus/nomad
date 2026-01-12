@@ -43,24 +43,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let network_task = tokio::spawn(async move {
         let app = nomad_clone.lock().await;
-        let mut announce_rx = app.announce_events().await;
-        let mut data_rx = app.received_data_events().await;
-        let interfaces = app.connected_interfaces();
+        let mut announce_rx = app.announce_events();
+        let mut data_rx = app.received_data_events();
+        let iface_manager = app.transport().iface_manager();
         let stats = app.stats().clone();
         drop(app);
 
         let mut node_announces = network_client_clone.node_announces();
         let mut stats_interval = tokio::time::interval(std::time::Duration::from_secs(1));
-
-        let status_msg = if interfaces.is_empty() {
-            "No interfaces configured".to_string()
-        } else {
-            format!("Connected to {} interface(s)", interfaces.len())
-        };
-        log::info!("Network task started: {}", status_msg);
-        let _ = event_tx_clone
-            .send(NetworkEvent::Status(status_msg))
-            .await;
+        let mut last_connected_count = 0usize;
 
         loop {
             tokio::select! {
@@ -72,8 +63,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     match cmd {
                         TuiCommand::Announce => {
                             let _ = event_tx_clone.send(NetworkEvent::Status("Announcing...".to_string())).await;
-                            let app = nomad_clone.lock().await;
-                            app.announce().await;
+                            log::info!("Announce command received");
+                            let (transport, delivery_dest) = {
+                                let app = nomad_clone.lock().await;
+                                (app.transport().clone(), app.delivery_destination())
+                            };
+                            if let Some(dest) = delivery_dest {
+                                transport.send_announce(&dest, None).await;
+                            }
+                            log::info!("Announce completed");
                             let _ = event_tx_clone.send(NetworkEvent::AnnounceSent).await;
                         }
                         TuiCommand::LoadConversations => {
@@ -164,9 +162,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 result = announce_rx.recv() => {
                     if let Ok(event) = result {
-                        let dest = event.destination.lock().await;
-                        network_client_clone.handle_announce(&dest, event.app_data.as_slice()).await;
-                        drop(dest);
+                        let (desc, identity) = {
+                            let guard = event.destination.lock().await;
+                            (guard.desc, guard.identity)
+                        };
+                        network_client_clone.handle_announce(desc, identity, event.app_data.as_slice()).await;
                     }
                 }
                 result = node_announces.recv() => {
@@ -188,6 +188,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 _ = stats_interval.tick() => {
                     let snapshot = stats.snapshot();
                     let _ = event_tx_clone.send(NetworkEvent::RelayStats(snapshot)).await;
+
+                    let connected_count = iface_manager.lock().await.interfaces().filter(|i| i.connected).count();
+                    if connected_count != last_connected_count {
+                        last_connected_count = connected_count;
+                        let status_msg = format!("Connected to {} interface(s)", connected_count);
+                        log::info!("{}", status_msg);
+                        let _ = event_tx_clone.send(NetworkEvent::Status(status_msg)).await;
+                    }
                 }
             }
         }
