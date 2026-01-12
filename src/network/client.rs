@@ -1,7 +1,5 @@
 use crate::network::node_registry::NodeRegistry;
-use crate::network::page_request::{
-    FileRequest, FileRequestHandle, PageRequest, PageRequestHandle, PageStatus,
-};
+use crate::network::page_request::{FetchRequest, FetchRequestHandle, PageStatus};
 use crate::network::types::{IdentityInfo, NodeInfo, PeerInfo};
 
 use reticulum::destination::link::{Link, LinkEvent};
@@ -96,13 +94,13 @@ impl NetworkClient {
         }
     }
 
-    pub async fn fetch_page(
+    pub async fn fetch(
         &self,
         node: &NodeInfo,
         path: &str,
         form_data: std::collections::HashMap<String, String>,
-    ) -> PageRequest {
-        let (handle, request) = PageRequestHandle::new();
+    ) -> FetchRequest {
+        let (handle, request) = FetchRequestHandle::new();
 
         let transport = self.transport.clone();
         let known_destinations = self.known_destinations.clone();
@@ -110,7 +108,7 @@ impl NetworkClient {
         let path = path.to_string();
 
         tokio::spawn(async move {
-            if let Err(e) = fetch_page_inner(
+            if let Err(e) = fetch_inner(
                 transport,
                 known_destinations,
                 &node,
@@ -120,26 +118,7 @@ impl NetworkClient {
             )
             .await
             {
-                log::error!("fetch_page failed: {}", e);
-            }
-        });
-
-        request
-    }
-
-    pub async fn fetch_file(&self, node: &NodeInfo, path: &str) -> FileRequest {
-        let (handle, request) = FileRequestHandle::new();
-
-        let transport = self.transport.clone();
-        let known_destinations = self.known_destinations.clone();
-        let node = node.clone();
-        let path = path.to_string();
-
-        tokio::spawn(async move {
-            if let Err(e) =
-                fetch_file_inner(transport, known_destinations, &node, &path, handle).await
-            {
-                log::error!("fetch_file failed: {}", e);
+                log::error!("fetch failed: {}", e);
             }
         });
 
@@ -164,13 +143,13 @@ macro_rules! check_cancelled {
     };
 }
 
-async fn fetch_page_inner(
+async fn fetch_inner(
     transport: Arc<Mutex<Transport>>,
     known_destinations: Arc<Mutex<HashMap<[u8; 16], DestinationDesc>>>,
     node: &NodeInfo,
     path: &str,
     form_data: std::collections::HashMap<String, String>,
-    handle: PageRequestHandle,
+    handle: FetchRequestHandle,
 ) -> Result<(), String> {
     let address_hash = AddressHash::from_bytes(&node.hash);
 
@@ -180,8 +159,10 @@ async fn fetch_page_inner(
         transport.lock().await.request_path(&address_hash).await;
 
         handle.set_status(PageStatus::WaitingForAnnounce);
-        let wait_result =
-            wait_for_path(&transport, &address_hash, &handle, PATH_REQUEST_TIMEOUT).await;
+        let wait_result = wait_for_path(&transport, &address_hash, PATH_REQUEST_TIMEOUT, || {
+            handle.is_cancelled()
+        })
+        .await;
 
         if !wait_result {
             check_cancelled!(handle);
@@ -215,7 +196,10 @@ async fn fetch_page_inner(
 
     if !already_active {
         let link_result =
-            wait_for_link_activation(&mut link_events, &link_id, &handle, LINK_TIMEOUT).await;
+            wait_for_link_activation(&mut link_events, &link_id, LINK_TIMEOUT, || {
+                handle.is_cancelled()
+            })
+            .await;
 
         match link_result {
             LinkWaitResult::Activated => {}
@@ -249,236 +233,6 @@ async fn fetch_page_inner(
 
     loop {
         check_cancelled!(handle);
-
-        let event = timeout(Duration::from_secs(60), link_events.recv()).await;
-
-        match event {
-            Ok(Ok(event_data)) if event_data.id == link_id => match event_data.event {
-                LinkEvent::Data(payload) => match parse_page_response(payload.as_slice()) {
-                    Ok(content) => {
-                        save_page_content(&content);
-                        handle.complete(content);
-                        return Ok(());
-                    }
-                    Err(e) => {
-                        handle.fail(e);
-                        return Ok(());
-                    }
-                },
-                LinkEvent::ResourcePacket { context, data } => {
-                    let link_guard = link.lock().await;
-                    let decrypt_fn = |ciphertext: &[u8]| -> Option<Vec<u8>> {
-                        let mut buf = vec![0u8; ciphertext.len() + 64];
-                        link_guard
-                            .decrypt(ciphertext, &mut buf)
-                            .ok()
-                            .map(|s| s.to_vec())
-                    };
-                    let encrypt_fn = |plaintext: &[u8]| -> Option<Vec<u8>> {
-                        let mut buf = vec![0u8; plaintext.len() + 64];
-                        link_guard
-                            .encrypt(plaintext, &mut buf)
-                            .ok()
-                            .map(|s| s.to_vec())
-                    };
-
-                    let result = resource_manager.handle_packet(
-                        &reticulum::packet::Packet {
-                            header: Default::default(),
-                            ifac: None,
-                            destination: link_id,
-                            transport: None,
-                            context,
-                            data: {
-                                let mut buf = reticulum::packet::PacketDataBuffer::new();
-                                buf.safe_write(&data);
-                                buf
-                            },
-                        },
-                        &link_id,
-                        decrypt_fn,
-                    );
-
-                    match result {
-                        ResourceHandleResult::RequestParts(hash) => {
-                            current_resource_hash = Some(hash);
-                            if let Some(info) = resource_manager.resource_info(&hash) {
-                                total_parts = info.total_parts;
-                                handle.set_status(PageStatus::Retrieving {
-                                    parts_received: info.received_count,
-                                    total_parts,
-                                });
-                            }
-                            if let Some(request_packet) =
-                                resource_manager.create_request_packet(&hash, &link_id, encrypt_fn)
-                            {
-                                drop(link_guard);
-                                transport.lock().await.send_packet(request_packet).await;
-                            }
-                        }
-                        ResourceHandleResult::Assemble(hash) => {
-                            if let Some(info) = resource_manager.resource_info(&hash) {
-                                handle.set_status(PageStatus::Retrieving {
-                                    parts_received: info.total_parts,
-                                    total_parts: info.total_parts,
-                                });
-                            }
-                            if let Some((data, proof_packet)) =
-                                resource_manager.assemble_and_prove(&hash, &link_id, decrypt_fn)
-                            {
-                                drop(link_guard);
-                                transport.lock().await.send_packet(proof_packet).await;
-
-                                match parse_resource_content(&data) {
-                                    Ok(content) => {
-                                        save_page_content(&content);
-                                        handle.complete(content);
-                                        return Ok(());
-                                    }
-                                    Err(e) => {
-                                        handle.fail(e);
-                                        return Ok(());
-                                    }
-                                }
-                            } else {
-                                handle.fail("Failed to assemble resource".into());
-                                return Ok(());
-                            }
-                        }
-                        ResourceHandleResult::None => {
-                            if let Some(ref hash) = current_resource_hash {
-                                if let Some(info) = resource_manager.resource_info(hash) {
-                                    handle.set_status(PageStatus::Retrieving {
-                                        parts_received: info.received_count,
-                                        total_parts: info.total_parts,
-                                    });
-                                }
-                            }
-                        }
-                    }
-                }
-                LinkEvent::Closed => {
-                    handle.fail("Link closed".into());
-                    return Ok(());
-                }
-                _ => {}
-            },
-            Ok(Ok(_)) => {}
-            Ok(Err(_)) => {
-                handle.fail("Link events channel closed".into());
-                return Ok(());
-            }
-            Err(_) => {
-                handle.fail("Request timed out".into());
-                return Ok(());
-            }
-        }
-    }
-}
-
-async fn fetch_file_inner(
-    transport: Arc<Mutex<Transport>>,
-    known_destinations: Arc<Mutex<HashMap<[u8; 16], DestinationDesc>>>,
-    node: &NodeInfo,
-    path: &str,
-    handle: FileRequestHandle,
-) -> Result<(), String> {
-    let address_hash = AddressHash::from_bytes(&node.hash);
-
-    let has_path = transport.lock().await.has_path(&address_hash).await;
-    if !has_path {
-        handle.set_status(PageStatus::RequestingPath);
-        transport.lock().await.request_path(&address_hash).await;
-
-        handle.set_status(PageStatus::WaitingForAnnounce);
-        let wait_result =
-            wait_for_path_file(&transport, &address_hash, &handle, PATH_REQUEST_TIMEOUT).await;
-
-        if !wait_result {
-            if handle.is_cancelled() {
-                handle.cancelled();
-                return Ok(());
-            }
-            handle.fail("No path to node - try again later".into());
-            return Ok(());
-        }
-    }
-
-    if handle.is_cancelled() {
-        handle.cancelled();
-        return Ok(());
-    }
-
-    if let Some(hops) = transport.lock().await.path_hops(&address_hash).await {
-        handle.set_status(PageStatus::PathFound { hops });
-    }
-
-    let dest_desc = {
-        let known = known_destinations.lock().await;
-        known.get(&node.hash).cloned()
-    }
-    .unwrap_or_else(|| node.to_destination_desc());
-
-    if handle.is_cancelled() {
-        handle.cancelled();
-        return Ok(());
-    }
-    handle.set_status(PageStatus::Connecting);
-
-    let tp = transport.lock().await;
-    let mut link_events = tp.out_link_events();
-    let link = tp.link(dest_desc).await;
-    let link_id = *link.lock().await.id();
-    let already_active =
-        link.lock().await.status() == reticulum::destination::link::LinkStatus::Active;
-    drop(tp);
-
-    if !already_active {
-        let link_result =
-            wait_for_link_activation_file(&mut link_events, &link_id, &handle, LINK_TIMEOUT).await;
-
-        match link_result {
-            LinkWaitResult::Activated => {}
-            LinkWaitResult::Closed => {
-                if handle.is_cancelled() {
-                    handle.cancelled();
-                    return Ok(());
-                }
-                handle.fail("Link closed".into());
-                return Ok(());
-            }
-            LinkWaitResult::Timeout => {
-                if handle.is_cancelled() {
-                    handle.cancelled();
-                    return Ok(());
-                }
-                handle.fail("Connection timed out".into());
-                return Ok(());
-            }
-        }
-    }
-
-    handle.set_status(PageStatus::LinkEstablished);
-    handle.set_status(PageStatus::SendingRequest);
-
-    let request_result =
-        send_page_request(&transport, &link, path, &std::collections::HashMap::new()).await;
-    if let Err(e) = request_result {
-        handle.fail(e);
-        return Ok(());
-    }
-
-    handle.set_status(PageStatus::AwaitingResponse);
-
-    let mut resource_manager = ResourceManager::new();
-    let mut current_resource_hash: Option<reticulum::hash::Hash> = None;
-    let mut total_parts: u32 = 0;
-
-    loop {
-        if handle.is_cancelled() {
-            handle.cancelled();
-            return Ok(());
-        }
 
         let event = timeout(Duration::from_secs(60), link_events.recv()).await;
 
@@ -604,39 +358,17 @@ async fn fetch_file_inner(
     }
 }
 
-async fn wait_for_path(
+async fn wait_for_path<F: Fn() -> bool>(
     transport: &Arc<Mutex<Transport>>,
     address_hash: &AddressHash,
-    handle: &PageRequestHandle,
     timeout_duration: Duration,
+    is_cancelled: F,
 ) -> bool {
     let start = std::time::Instant::now();
     let check_interval = Duration::from_millis(100);
 
     while start.elapsed() < timeout_duration {
-        if handle.is_cancelled() {
-            return false;
-        }
-        if transport.lock().await.has_path(address_hash).await {
-            return true;
-        }
-        tokio::time::sleep(check_interval).await;
-    }
-
-    false
-}
-
-async fn wait_for_path_file(
-    transport: &Arc<Mutex<Transport>>,
-    address_hash: &AddressHash,
-    handle: &FileRequestHandle,
-    timeout_duration: Duration,
-) -> bool {
-    let start = std::time::Instant::now();
-    let check_interval = Duration::from_millis(100);
-
-    while start.elapsed() < timeout_duration {
-        if handle.is_cancelled() {
+        if is_cancelled() {
             return false;
         }
         if transport.lock().await.has_path(address_hash).await {
@@ -654,47 +386,16 @@ enum LinkWaitResult {
     Timeout,
 }
 
-async fn wait_for_link_activation(
+async fn wait_for_link_activation<F: Fn() -> bool>(
     link_events: &mut broadcast::Receiver<reticulum::destination::link::LinkEventData>,
     link_id: &AddressHash,
-    handle: &PageRequestHandle,
     timeout_duration: Duration,
+    is_cancelled: F,
 ) -> LinkWaitResult {
     let deadline = tokio::time::Instant::now() + timeout_duration;
 
     loop {
-        if handle.is_cancelled() {
-            return LinkWaitResult::Closed;
-        }
-
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() {
-            return LinkWaitResult::Timeout;
-        }
-
-        match timeout(remaining, link_events.recv()).await {
-            Ok(Ok(event_data)) if event_data.id == *link_id => match event_data.event {
-                LinkEvent::Activated => return LinkWaitResult::Activated,
-                LinkEvent::Closed => return LinkWaitResult::Closed,
-                _ => {}
-            },
-            Ok(Ok(_)) => {}
-            Ok(Err(_)) => return LinkWaitResult::Closed,
-            Err(_) => return LinkWaitResult::Timeout,
-        }
-    }
-}
-
-async fn wait_for_link_activation_file(
-    link_events: &mut broadcast::Receiver<reticulum::destination::link::LinkEventData>,
-    link_id: &AddressHash,
-    handle: &FileRequestHandle,
-    timeout_duration: Duration,
-) -> LinkWaitResult {
-    let deadline = tokio::time::Instant::now() + timeout_duration;
-
-    loop {
-        if handle.is_cancelled() {
+        if is_cancelled() {
             return LinkWaitResult::Closed;
         }
 
@@ -790,10 +491,12 @@ fn parse_page_response_bytes(data: &[u8]) -> Result<Vec<u8>, String> {
 }
 
 fn parse_resource_content_bytes(data: &[u8]) -> Result<Vec<u8>, String> {
-    let response: (serde_bytes::ByteBuf, serde_bytes::ByteBuf) = rmp_serde::from_slice(data)
-        .map_err(|e| format!("Failed to parse resource response: {}", e))?;
-
-    Ok(response.1.to_vec())
+    if let Ok(response) =
+        rmp_serde::from_slice::<(serde_bytes::ByteBuf, serde_bytes::ByteBuf)>(data)
+    {
+        return Ok(response.1.to_vec());
+    }
+    Ok(data.to_vec())
 }
 
 fn save_page_content(content: &str) {

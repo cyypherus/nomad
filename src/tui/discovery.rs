@@ -27,6 +27,7 @@ pub struct DiscoveryView {
     modal_selected: usize,
     last_height: usize,
     last_modal_area: Rect,
+    last_list_area: Rect,
 }
 
 impl Default for DiscoveryView {
@@ -45,6 +46,7 @@ impl DiscoveryView {
             modal_selected: 0,
             last_height: 10,
             last_modal_area: Rect::default(),
+            last_list_area: Rect::default(),
         }
     }
 
@@ -109,7 +111,7 @@ impl DiscoveryView {
     pub fn open_modal(&mut self) {
         if !self.nodes.is_empty() {
             self.modal_open = true;
-            self.modal_selected = 0;
+            self.modal_selected = 2;
         }
     }
 
@@ -122,19 +124,30 @@ impl DiscoveryView {
             return ModalAction::None;
         }
         match self.modal_selected {
-            0 => ModalAction::Connect,
+            0 => ModalAction::Dismiss,
             1 => ModalAction::Save,
-            2 => ModalAction::Dismiss,
+            2 => ModalAction::Connect,
             _ => ModalAction::None,
         }
     }
 
-    pub fn click(&mut self, _x: u16, y: u16, area: Rect) -> Option<usize> {
+    pub fn click(&mut self, x: u16, y: u16, _area: Rect) -> Option<usize> {
         if self.modal_open {
             return None;
         }
 
-        let inner_y = y.saturating_sub(area.y + 1);
+        let list_inner = Rect::new(
+            self.last_list_area.x + 1,
+            self.last_list_area.y + 1,
+            self.last_list_area.width.saturating_sub(2),
+            self.last_list_area.height.saturating_sub(2),
+        );
+
+        if !list_inner.contains((x, y).into()) {
+            return None;
+        }
+
+        let inner_y = y.saturating_sub(list_inner.y);
         let idx = self.scroll_offset + inner_y as usize;
 
         if idx < self.nodes.len() {
@@ -153,9 +166,9 @@ impl DiscoveryView {
         let modal = self.build_modal();
         if let Some(idx) = modal.hit_test_buttons(x, y, self.last_modal_area) {
             match idx {
-                0 => ModalAction::Connect,
+                0 => ModalAction::Dismiss,
                 1 => ModalAction::Save,
-                2 => ModalAction::Dismiss,
+                2 => ModalAction::Connect,
                 _ => ModalAction::None,
             }
         } else {
@@ -198,14 +211,16 @@ impl DiscoveryView {
         Modal::new("Node")
             .content(content)
             .buttons(vec![
-                ModalButton::new("Connect", Color::Magenta),
+                ModalButton::new("Cancel", Color::DarkGray),
                 ModalButton::new("Save", Color::Green),
-                ModalButton::new("Cancel", Color::Red),
+                ModalButton::new("Connect", Color::Magenta),
             ])
             .selected(self.modal_selected)
     }
 
     pub fn render_list(&mut self, area: Rect, buf: &mut Buffer) {
+        self.last_list_area = area;
+
         let block = Block::default()
             .title(Line::from(vec![
                 Span::styled(

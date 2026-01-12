@@ -305,8 +305,8 @@ impl TuiApp {
                 let modal = Modal::new(field_name)
                     .content(content)
                     .buttons(vec![
+                        ModalButton::new("Cancel", Color::DarkGray),
                         ModalButton::new("Confirm", Color::Green),
-                        ModalButton::new("Cancel", Color::Red),
                     ])
                     .border_color(Color::Cyan);
 
@@ -337,8 +337,8 @@ impl TuiApp {
                 let modal = Modal::new("Download")
                     .content(content)
                     .buttons(vec![
+                        ModalButton::new("Cancel", Color::DarkGray),
                         ModalButton::new("Download", Color::Green),
-                        ModalButton::new("Cancel", Color::Red),
                     ])
                     .border_color(Color::Yellow);
 
@@ -461,12 +461,7 @@ impl TuiApp {
                 }
             }
             Event::Mouse(mouse) => {
-                if !matches!(
-                    self.mode,
-                    AppMode::Editing { .. } | AppMode::ConfirmDownload { .. }
-                ) {
-                    self.handle_mouse(mouse.kind, mouse.column, mouse.row);
-                }
+                self.handle_mouse(mouse.kind, mouse.column, mouse.row);
             }
             _ => {}
         }
@@ -584,15 +579,15 @@ impl TuiApp {
     fn handle_edit_modal_click(&mut self, x: u16, y: u16) {
         let modal = Modal::new("")
             .buttons(vec![
+                ModalButton::new("Cancel", Color::DarkGray),
                 ModalButton::new("Confirm", Color::Green),
-                ModalButton::new("Cancel", Color::Red),
             ])
-            .selected(0);
+            .selected(1);
 
         if let Some(idx) = modal.hit_test_buttons(x, y, self.last_edit_popup_area) {
             match idx {
-                0 => self.confirm_edit(),
-                1 => self.cancel_edit(),
+                0 => self.cancel_edit(),
+                1 => self.confirm_edit(),
                 _ => {}
             }
         }
@@ -620,15 +615,15 @@ impl TuiApp {
 
         let modal = Modal::new("")
             .buttons(vec![
+                ModalButton::new("Cancel", Color::DarkGray),
                 ModalButton::new("Download", Color::Green),
-                ModalButton::new("Cancel", Color::Red),
             ])
-            .selected(0);
+            .selected(1);
 
         if let Some(idx) = modal.hit_test_buttons(x, y, area) {
             match idx {
-                0 => self.confirm_download(),
-                1 => self.cancel_download(),
+                0 => self.cancel_download(),
+                1 => self.confirm_download(),
                 _ => {}
             }
         }
@@ -749,6 +744,9 @@ impl TuiApp {
                             Tab::Saved => {
                                 if self.saved.click(x, y, self.last_main_area).is_some() {
                                     self.saved.open_modal();
+                                } else {
+                                    let action = self.saved.click_detail(x, y);
+                                    self.handle_saved_modal_action(action);
                                 }
                             }
                             Tab::MyNode => {
@@ -819,9 +817,10 @@ impl TuiApp {
                     self.status_bar.set_status("Node saved".into());
                 }
             }
-            ModalAction::Dismiss | ModalAction::None => {
+            ModalAction::Dismiss => {
                 self.discovery.close_modal();
             }
+            ModalAction::None => {}
         }
     }
 
@@ -840,9 +839,10 @@ impl TuiApp {
                         .set_status(format!("Removed {}", removed.name));
                 }
             }
-            SavedModalAction::Cancel | SavedModalAction::None => {
+            SavedModalAction::Cancel => {
                 self.saved.close_modal();
             }
+            SavedModalAction::None => {}
         }
     }
 

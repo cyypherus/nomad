@@ -1,3 +1,4 @@
+use super::button::{Button, ButtonRow};
 use super::modal::{Modal, ModalButton};
 use crate::network::NodeInfo;
 use ratatui::{
@@ -27,6 +28,8 @@ pub struct SavedView {
     modal_open: bool,
     modal_selected: usize,
     last_modal_area: Rect,
+    last_list_area: Rect,
+    detail_buttons: ButtonRow,
 }
 
 impl Default for SavedView {
@@ -45,12 +48,21 @@ impl SavedView {
             modal_open: false,
             modal_selected: 0,
             last_modal_area: Rect::default(),
+            last_list_area: Rect::default(),
+            detail_buttons: ButtonRow::new(vec![
+                Button::new("Remove", Color::Red),
+                Button::new("Connect", Color::Magenta),
+            ]),
         }
     }
 
     pub fn add_node(&mut self, node: NodeInfo) {
         if !self.nodes.iter().any(|n| n.hash == node.hash) {
-            self.nodes.push(node);
+            let pos = self
+                .nodes
+                .binary_search_by(|n| n.name.to_lowercase().cmp(&node.name.to_lowercase()))
+                .unwrap_or_else(|p| p);
+            self.nodes.insert(pos, node);
         }
     }
 
@@ -106,7 +118,7 @@ impl SavedView {
     pub fn open_modal(&mut self) {
         if !self.nodes.is_empty() {
             self.modal_open = true;
-            self.modal_selected = 0;
+            self.modal_selected = 2;
         }
     }
 
@@ -126,19 +138,30 @@ impl SavedView {
             return SavedModalAction::None;
         }
         match self.modal_selected {
-            0 => SavedModalAction::Connect,
+            0 => SavedModalAction::Cancel,
             1 => SavedModalAction::Delete,
-            2 => SavedModalAction::Cancel,
+            2 => SavedModalAction::Connect,
             _ => SavedModalAction::None,
         }
     }
 
-    pub fn click(&mut self, _x: u16, y: u16, area: Rect) -> Option<usize> {
+    pub fn click(&mut self, x: u16, y: u16, _area: Rect) -> Option<usize> {
         if self.modal_open {
             return None;
         }
 
-        let inner_y = y.saturating_sub(area.y + 1);
+        let list_inner = Rect::new(
+            self.last_list_area.x + 1,
+            self.last_list_area.y + 1,
+            self.last_list_area.width.saturating_sub(2),
+            self.last_list_area.height.saturating_sub(2),
+        );
+
+        if !list_inner.contains((x, y).into()) {
+            return None;
+        }
+
+        let inner_y = y.saturating_sub(list_inner.y);
         let idx = self.scroll_offset + inner_y as usize;
 
         if idx < self.nodes.len() {
@@ -157,9 +180,9 @@ impl SavedView {
         let modal = self.build_modal();
         if let Some(idx) = modal.hit_test_buttons(x, y, self.last_modal_area) {
             match idx {
-                0 => SavedModalAction::Connect,
+                0 => SavedModalAction::Cancel,
                 1 => SavedModalAction::Delete,
-                2 => SavedModalAction::Cancel,
+                2 => SavedModalAction::Connect,
                 _ => SavedModalAction::None,
             }
         } else {
@@ -213,14 +236,16 @@ impl SavedView {
         Modal::new("Node")
             .content(content)
             .buttons(vec![
-                ModalButton::new("Connect", Color::Magenta),
-                ModalButton::new("Delete", Color::Red),
                 ModalButton::new("Cancel", Color::DarkGray),
+                ModalButton::new("Delete", Color::Red),
+                ModalButton::new("Connect", Color::Magenta),
             ])
             .selected(self.modal_selected)
     }
 
     fn render_list(&mut self, area: Rect, buf: &mut Buffer) {
+        self.last_list_area = area;
+
         let block = Block::default()
             .title(Line::from(vec![
                 Span::styled(
@@ -299,7 +324,7 @@ impl SavedView {
         list.render(inner, buf);
     }
 
-    fn render_detail(&self, area: Rect, buf: &mut Buffer) {
+    fn render_detail(&mut self, area: Rect, buf: &mut Buffer) {
         let block = Block::default()
             .title(Line::from(vec![Span::styled(
                 " Node Info ",
@@ -342,17 +367,28 @@ impl SavedView {
                 &hash_hex[16..],
                 Style::default().fg(Color::Cyan),
             )),
-            Line::from(""),
-            Line::from(""),
-            Line::from(vec![
-                Span::styled("[Enter]", Style::default().fg(Color::Magenta)),
-                Span::raw(" Connect  "),
-                Span::styled("[d]", Style::default().fg(Color::Red)),
-                Span::raw(" Remove"),
-            ]),
         ];
 
         Paragraph::new(content).render(inner, buf);
+
+        let button_y = inner.y + inner.height.saturating_sub(1);
+        self.detail_buttons.render_left(inner.x, button_y, buf);
+    }
+
+    pub fn click_detail(&mut self, x: u16, y: u16) -> SavedModalAction {
+        if self.nodes.is_empty() {
+            return SavedModalAction::None;
+        }
+
+        if let Some(idx) = self.detail_buttons.hit_test(x, y) {
+            match idx {
+                0 => SavedModalAction::Delete,
+                1 => SavedModalAction::Connect,
+                _ => SavedModalAction::None,
+            }
+        } else {
+            SavedModalAction::None
+        }
     }
 
     fn render_modal(&mut self, area: Rect, buf: &mut Buffer) {

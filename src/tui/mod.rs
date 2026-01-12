@@ -1,5 +1,6 @@
 mod app;
 mod browser_view;
+mod button;
 mod conversations;
 mod directory;
 mod discovery;

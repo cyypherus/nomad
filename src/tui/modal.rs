@@ -105,14 +105,10 @@ impl<'a> Modal<'a> {
         let mut cur_x = start_x;
 
         for (i, button) in self.buttons.iter().enumerate() {
-            let style = if i == self.selected {
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(button.color)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(button.color)
-            };
+            let mut style = Style::default().fg(Color::Black).bg(button.color);
+            if i == self.selected {
+                style = style.add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
+            }
 
             let label = format!(" {} ", button.label);
             buf.set_string(cur_x, y, &label, style);

@@ -1,6 +1,6 @@
 use crate::network::NodeInfo;
 
-const MICRON_EXTENSIONS: &[&str] = &["", "mu", "md", "txt", "micron"];
+const MICRON_EXTENSIONS: &[&str] = &["", "mu", "md", "micron"];
 
 #[derive(Debug, Clone)]
 pub enum LinkAction {

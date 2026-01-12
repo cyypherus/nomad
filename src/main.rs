@@ -106,7 +106,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let url = format!("{}:{}", node.hash_hex(), path);
                             let event_tx = event_tx_clone.clone();
 
-                            let request = network_client_clone.fetch_page(&node, &path, form_data).await;
+                            let request = network_client_clone.fetch(&node, &path, form_data).await;
                             let mut status_rx = request.status_receiver();
 
                             tokio::spawn(async move {
@@ -143,7 +143,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
 
                                 match request.result().await {
-                                    Ok(content) => {
+                                    Ok(data) => {
+                                        let content = String::from_utf8_lossy(&data).into_owned();
                                         let _ = event_tx.send(NetworkEvent::PageReceived { url, content }).await;
                                     }
                                     Err(e) => {
@@ -153,8 +154,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             });
                         }
                         TuiCommand::DownloadFile { node, path, filename } => {
+                            log::info!("Download requested: {} from {} path={}", filename, node.name, path);
                             let event_tx = event_tx_clone.clone();
-                            let request = network_client_clone.fetch_file(&node, &path).await;
+                            let request = network_client_clone.fetch(&node, &path, std::collections::HashMap::new()).await;
                             let mut status_rx = request.status_receiver();
                             let filename_clone = filename.clone();
 
@@ -207,14 +209,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         }
 
                                         let file_path = download_dir.join(&filename);
+                                        log::info!("Writing {} bytes to {:?}", data.len(), file_path);
                                         match std::fs::write(&file_path, &data) {
                                             Ok(_) => {
+                                                log::info!("Download complete: {:?}", file_path);
                                                 let _ = event_tx.send(NetworkEvent::DownloadComplete {
                                                     filename,
                                                     path: file_path.display().to_string(),
                                                 }).await;
                                             }
                                             Err(e) => {
+                                                log::error!("Failed to write file: {}", e);
                                                 let _ = event_tx.send(NetworkEvent::DownloadFailed {
                                                     filename,
                                                     reason: format!("Failed to write file: {}", e),
@@ -223,6 +228,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         }
                                     }
                                     Err(e) => {
+                                        log::error!("Download failed: {}", e);
                                         let _ = event_tx.send(NetworkEvent::DownloadFailed {
                                             filename,
                                             reason: e,
