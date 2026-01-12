@@ -45,16 +45,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let app = nomad_clone.lock().await;
         let mut announce_rx = app.announce_events().await;
         let mut data_rx = app.received_data_events().await;
-        let testnet = app.testnet_address().to_string();
+        let interfaces = app.connected_interfaces();
         let stats = app.stats().clone();
         drop(app);
 
         let mut node_announces = network_client_clone.node_announces();
         let mut stats_interval = tokio::time::interval(std::time::Duration::from_secs(1));
 
-        log::info!("Network task started, connected to {}", testnet);
+        let status_msg = if interfaces.is_empty() {
+            "No interfaces configured".to_string()
+        } else {
+            format!("Connected to {} interface(s)", interfaces.len())
+        };
+        log::info!("Network task started: {}", status_msg);
         let _ = event_tx_clone
-            .send(NetworkEvent::Status(format!("Connected to {}", testnet)))
+            .send(NetworkEvent::Status(status_msg))
             .await;
 
         loop {

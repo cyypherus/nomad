@@ -67,19 +67,28 @@ impl NomadApp {
 
         log::info!("Message storage initialized at {:?}", storage_path);
 
-        let iface = &config.network.testnet;
-        log::info!("Connecting to {}", iface);
+        let enabled_interfaces = config.enabled_interfaces();
+        if enabled_interfaces.is_empty() {
+            log::warn!("No interfaces configured! Add interfaces to config.toml");
+        }
 
-        transport
-            .lock()
-            .await
-            .iface_manager()
-            .lock()
-            .await
-            .spawn(TcpClient::new(iface), TcpClient::spawn);
+        for (name, iface_config) in &enabled_interfaces {
+            let addr = iface_config.address();
+            log::info!("Connecting to {} ({})", name, addr);
 
-        node.announce().await;
-        log::info!("Announced on network");
+            transport
+                .lock()
+                .await
+                .iface_manager()
+                .lock()
+                .await
+                .spawn(TcpClient::new(&addr), TcpClient::spawn);
+        }
+
+        if !enabled_interfaces.is_empty() {
+            node.announce().await;
+            log::info!("Announced on network");
+        }
 
         Ok(Self {
             config,
@@ -96,8 +105,12 @@ impl NomadApp {
         self.dest_hash
     }
 
-    pub fn testnet_address(&self) -> &str {
-        &self.config.network.testnet
+    pub fn connected_interfaces(&self) -> Vec<String> {
+        self.config
+            .enabled_interfaces()
+            .iter()
+            .map(|(name, iface)| format!("{} ({})", name, iface.address()))
+            .collect()
     }
 
     pub fn relay_enabled(&self) -> bool {
