@@ -47,6 +47,7 @@ pub enum NetworkEvent {
     PageFailed { url: String, reason: String },
     DownloadComplete { filename: String, path: String },
     DownloadFailed { filename: String, reason: String },
+    RelayStats(reticulum::transport::TransportStatsSnapshot),
 }
 
 #[derive(Debug, Clone)]
@@ -113,6 +114,7 @@ impl TuiApp {
     pub fn new(
         dest_hash: [u8; 16],
         initial_nodes: Vec<NodeInfo>,
+        relay_enabled: bool,
         event_rx: mpsc::Receiver<NetworkEvent>,
         cmd_tx: mpsc::Sender<TuiCommand>,
     ) -> io::Result<Self> {
@@ -143,7 +145,7 @@ impl TuiApp {
             mode: AppMode::Normal,
             discovery,
             saved,
-            mynode: MyNodeView::new(dest_hash),
+            mynode: MyNodeView::new(dest_hash, relay_enabled),
             browser: BrowserView::new(),
             status_bar: StatusBar::new(),
             input: Input::default(),
@@ -171,11 +173,11 @@ impl TuiApp {
             match event {
                 NetworkEvent::NodeAnnounce(node) => {
                     self.discovery.add_node(node);
-                    self.status_bar.increment_received();
+                    self.mynode.increment_announces_received();
                     self.status_bar.set_status("Node discovered".into());
                 }
                 NetworkEvent::AnnounceSent => {
-                    self.status_bar.increment_sent();
+                    self.mynode.increment_announces_sent();
                     self.mynode.update_announce_time();
                     self.status_bar.set_status("Announced".into());
                 }
@@ -201,6 +203,10 @@ impl TuiApp {
                 NetworkEvent::MessageReceived(_)
                 | NetworkEvent::ConversationsUpdated(_)
                 | NetworkEvent::MessagesLoaded(_) => {}
+                NetworkEvent::RelayStats(stats) => {
+                    self.mynode.set_stats(stats.clone());
+                    self.status_bar.set_relay_stats(stats);
+                }
             }
         }
     }

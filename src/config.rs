@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use thiserror::Error;
@@ -17,29 +18,64 @@ pub struct Config {
     pub network: NetworkConfig,
     #[serde(default)]
     pub node: NodeConfig,
+    #[serde(default)]
+    pub interfaces: HashMap<String, InterfaceConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NetworkConfig {
-    pub testnet: String,
-    pub custom_interface: Option<String>,
     #[serde(default)]
     pub relay: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum InterfaceConfig {
+    TCPClientInterface {
+        #[serde(default = "default_true")]
+        enabled: bool,
+        target_host: String,
+        target_port: u16,
+    },
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl InterfaceConfig {
+    pub fn is_enabled(&self) -> bool {
+        match self {
+            InterfaceConfig::TCPClientInterface { enabled, .. } => *enabled,
+        }
+    }
+
+    pub fn address(&self) -> String {
+        match self {
+            InterfaceConfig::TCPClientInterface {
+                target_host,
+                target_port,
+                ..
+            } => format!("{}:{}", target_host, target_port),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeConfig {
+    #[serde(default)]
     pub enabled: bool,
+    #[serde(default = "default_pages_path")]
     pub pages_path: String,
+}
+
+fn default_pages_path() -> String {
+    "pages".to_string()
 }
 
 impl Default for NetworkConfig {
     fn default() -> Self {
-        Self {
-            testnet: "reticulum.qortal.link:4242".to_string(),
-            custom_interface: None,
-            relay: false,
-        }
+        Self { relay: false }
     }
 }
 
@@ -47,7 +83,7 @@ impl Default for NodeConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            pages_path: "pages".to_string(),
+            pages_path: default_pages_path(),
         }
     }
 }
@@ -60,10 +96,35 @@ impl Config {
             let contents = fs::read_to_string(&config_path)?;
             Ok(toml::from_str(&contents)?)
         } else {
-            let config = Config::default();
+            let config = Config::default_with_example_interface();
             config.save()?;
             Ok(config)
         }
+    }
+
+    fn default_with_example_interface() -> Self {
+        let mut interfaces = HashMap::new();
+        interfaces.insert(
+            "Default TCP".to_string(),
+            InterfaceConfig::TCPClientInterface {
+                enabled: true,
+                target_host: "amsterdam.connect.reticulum.network".to_string(),
+                target_port: 4965,
+            },
+        );
+        Self {
+            network: NetworkConfig::default(),
+            node: NodeConfig::default(),
+            interfaces,
+        }
+    }
+
+    pub fn enabled_interfaces(&self) -> Vec<(&str, &InterfaceConfig)> {
+        self.interfaces
+            .iter()
+            .filter(|(_, iface)| iface.is_enabled())
+            .map(|(name, iface)| (name.as_str(), iface))
+            .collect()
     }
 
     pub fn save(&self) -> Result<(), ConfigError> {

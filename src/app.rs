@@ -2,6 +2,7 @@ use lxmf::{
     ConversationInfo, LxMessage, LxmfNode, StorageError, StoredMessage, DESTINATION_LENGTH,
 };
 use reticulum::iface::tcp_client::TcpClient;
+use reticulum::iface::RxMessage;
 use reticulum::transport::{AnnounceEvent, ReceivedData};
 use reticulum::transport::{Transport, TransportConfig};
 use std::sync::Arc;
@@ -11,6 +12,7 @@ use tokio::sync::Mutex;
 use crate::config::{Config, ConfigError};
 use crate::conversation::{ConversationManager, SqliteStorage};
 use crate::identity::{Identity, IdentityError};
+use reticulum::transport::TransportStats;
 
 #[derive(Error, Debug)]
 pub enum AppError {
@@ -29,10 +31,12 @@ pub enum AppError {
 pub struct NomadApp {
     #[allow(dead_code)]
     config: Config,
-    transport: Arc<Mutex<Transport>>,
+    transport: Arc<Transport>,
     node: LxmfNode,
     dest_hash: [u8; 16],
     conversations: ConversationManager<SqliteStorage>,
+    relay_enabled: bool,
+    stats: Arc<TransportStats>,
 }
 
 impl NomadApp {
@@ -42,12 +46,15 @@ impl NomadApp {
 
         log::info!("Identity loaded");
 
+        let relay_enabled = config.network.relay;
         let mut transport_config = TransportConfig::new("nomad", identity.inner().inner(), false);
-        if config.network.relay {
+        if relay_enabled {
             transport_config.set_retransmit(true);
             log::info!("Transport relay enabled - retransmitting announces and forwarding packets");
         }
-        let transport = Arc::new(Mutex::new(Transport::new(transport_config)));
+        let transport = Transport::new(transport_config);
+        let stats = transport.stats();
+        let transport = Arc::new(transport);
 
         let mut node = LxmfNode::new(identity.into_inner(), transport.clone());
         let dest_hash = node.register_delivery_destination().await;
@@ -60,19 +67,28 @@ impl NomadApp {
 
         log::info!("Message storage initialized at {:?}", storage_path);
 
-        let iface = &config.network.testnet;
-        log::info!("Connecting to {}", iface);
+        let enabled_interfaces = config.enabled_interfaces();
+        if enabled_interfaces.is_empty() {
+            log::warn!("No interfaces configured! Add interfaces to config.toml");
+        }
 
-        transport
-            .lock()
-            .await
-            .iface_manager()
-            .lock()
-            .await
-            .spawn(TcpClient::new(iface), TcpClient::spawn);
+        for (name, iface_config) in &enabled_interfaces {
+            let addr = iface_config.address();
+            log::info!("Connecting to {} ({})", name, addr);
 
-        node.announce().await;
-        log::info!("Announced on network");
+            let iface_manager = transport.iface_manager();
+            iface_manager.lock().await.spawn(
+                TcpClient::new(&addr),
+                addr,
+                iface_manager.clone(),
+                TcpClient::spawn,
+            );
+        }
+
+        if !enabled_interfaces.is_empty() {
+            node.announce().await;
+            log::info!("Announced on network");
+        }
 
         Ok(Self {
             config,
@@ -80,6 +96,8 @@ impl NomadApp {
             node,
             dest_hash,
             conversations,
+            relay_enabled,
+            stats,
         })
     }
 
@@ -87,20 +105,34 @@ impl NomadApp {
         self.dest_hash
     }
 
-    pub fn testnet_address(&self) -> &str {
-        &self.config.network.testnet
+    pub fn relay_enabled(&self) -> bool {
+        self.relay_enabled
     }
 
-    pub async fn announce_events(&self) -> tokio::sync::broadcast::Receiver<AnnounceEvent> {
-        self.node.announce_events().await
+    pub fn stats(&self) -> &Arc<TransportStats> {
+        &self.stats
     }
 
-    pub async fn received_data_events(&self) -> tokio::sync::broadcast::Receiver<ReceivedData> {
-        self.node.received_data_events().await
+    pub fn iface_rx(&self) -> tokio::sync::broadcast::Receiver<RxMessage> {
+        self.transport.iface_rx()
+    }
+
+    pub fn announce_events(&self) -> tokio::sync::broadcast::Receiver<AnnounceEvent> {
+        self.node.announce_events()
+    }
+
+    pub fn received_data_events(&self) -> tokio::sync::broadcast::Receiver<ReceivedData> {
+        self.node.received_data_events()
     }
 
     pub async fn announce(&self) {
         self.node.announce().await;
+    }
+
+    pub fn delivery_destination(
+        &self,
+    ) -> Option<Arc<Mutex<reticulum::destination::SingleInputDestination>>> {
+        self.node.delivery_destination()
     }
 
     pub async fn handle_announce(&mut self, event: &AnnounceEvent) {
@@ -152,7 +184,7 @@ impl NomadApp {
         self.conversations.mark_conversation_read(peer)
     }
 
-    pub fn transport(&self) -> &Arc<Mutex<Transport>> {
+    pub fn transport(&self) -> &Arc<Transport> {
         &self.transport
     }
 }
