@@ -2,6 +2,7 @@ use lxmf::{
     ConversationInfo, LxMessage, LxmfNode, StorageError, StoredMessage, DESTINATION_LENGTH,
 };
 use reticulum::iface::tcp_client::TcpClient;
+use reticulum::iface::tcp_server::TcpServer;
 use reticulum::iface::RxMessage;
 use reticulum::transport::{AnnounceEvent, ReceivedData};
 use reticulum::transport::{Transport, TransportConfig};
@@ -47,10 +48,10 @@ impl NomadApp {
         log::info!("Identity loaded");
 
         let relay_enabled = config.network.relay;
-        let mut transport_config = TransportConfig::new("nomad", identity.inner().inner(), false);
+        let mut transport_config = TransportConfig::new("nomad", identity.inner().inner(), relay_enabled);
         if relay_enabled {
             transport_config.set_retransmit(true);
-            log::info!("Transport relay enabled - retransmitting announces and forwarding packets");
+            log::info!("Transport relay enabled - broadcasting and forwarding packets");
         }
         let transport = Transport::new(transport_config);
         let stats = transport.stats();
@@ -70,6 +71,17 @@ impl NomadApp {
         let enabled_interfaces = config.enabled_interfaces();
         if enabled_interfaces.is_empty() {
             log::warn!("No interfaces configured! Add interfaces to config.toml");
+        }
+
+        if let Some(port) = config.network.listen_port {
+            let listen_addr = format!("0.0.0.0:{}", port);
+            log::info!("Listening on {}", listen_addr);
+
+            let iface_manager = transport.iface_manager();
+            let mut mgr = iface_manager.lock().await;
+            let inner = TcpServer::new(&listen_addr, iface_manager.clone());
+            let (context, _unreg) = mgr.new_context(inner, listen_addr);
+            tokio::spawn(TcpServer::spawn(context));
         }
 
         for (name, iface_config) in &enabled_interfaces {

@@ -26,6 +26,8 @@ pub struct Config {
 pub struct NetworkConfig {
     #[serde(default)]
     pub relay: bool,
+    #[serde(default)]
+    pub listen_port: Option<u16>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,7 +77,10 @@ fn default_pages_path() -> String {
 
 impl Default for NetworkConfig {
     fn default() -> Self {
-        Self { relay: false }
+        Self {
+            relay: false,
+            listen_port: None,
+        }
     }
 }
 

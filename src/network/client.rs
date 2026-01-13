@@ -347,6 +347,11 @@ async fn fetch_inner(
                         }
                     }
                 }
+                LinkEvent::Response { request_id: _, data } => {
+                    log::debug!("fetch_page: received Response event, data_len={}", data.len());
+                    handle.complete(data);
+                    return Ok(());
+                }
                 LinkEvent::Closed => {
                     handle.fail("Link closed".into());
                     return Ok(());
