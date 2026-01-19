@@ -22,12 +22,10 @@ pub struct Config {
     pub interfaces: HashMap<String, InterfaceConfig>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NetworkConfig {
     #[serde(default)]
     pub relay: bool,
-    #[serde(default)]
-    pub listen_port: Option<u16>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -39,6 +37,17 @@ pub enum InterfaceConfig {
         target_host: String,
         target_port: u16,
     },
+    TCPServerInterface {
+        #[serde(default = "default_true")]
+        enabled: bool,
+        #[serde(default = "default_listen_ip")]
+        listen_ip: String,
+        listen_port: u16,
+    },
+}
+
+fn default_listen_ip() -> String {
+    "0.0.0.0".to_string()
 }
 
 fn default_true() -> bool {
@@ -49,16 +58,7 @@ impl InterfaceConfig {
     pub fn is_enabled(&self) -> bool {
         match self {
             InterfaceConfig::TCPClientInterface { enabled, .. } => *enabled,
-        }
-    }
-
-    pub fn address(&self) -> String {
-        match self {
-            InterfaceConfig::TCPClientInterface {
-                target_host,
-                target_port,
-                ..
-            } => format!("{}:{}", target_host, target_port),
+            InterfaceConfig::TCPServerInterface { enabled, .. } => *enabled,
         }
     }
 }
@@ -73,15 +73,6 @@ pub struct NodeConfig {
 
 fn default_pages_path() -> String {
     "pages".to_string()
-}
-
-impl Default for NetworkConfig {
-    fn default() -> Self {
-        Self {
-            relay: false,
-            listen_port: None,
-        }
-    }
 }
 
 impl Default for NodeConfig {

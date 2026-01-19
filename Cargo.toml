@@ -4,8 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-lxmf = { path = "../lxmf" }
-reticulum = { path = "../reticulum", features = ["packet-trace"] }
+rinse = { path = "../rinse", features = ["tokio"] }
 micronaut = { path = "../micronaut", features = ["ratatui"] }
 
 tokio = { version = "1", features = ["full"] }
@@ -20,11 +19,11 @@ thiserror = "1"
 hex = "0.4"
 log = "0.4"
 simplelog = "0.12"
-rusqlite = { version = "0.32", features = ["bundled"] }
 rmp-serde = "1.3"
 serde_bytes = "0.11"
 sha2 = "0.10"
+rand = "0.8"
+cli-clipboard = "0.4"
 
 [dev-dependencies]
-rand = "0.8"
 ed25519-dalek = { version = "2", features = ["rand_core"] }

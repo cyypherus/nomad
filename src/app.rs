@@ -1,19 +1,10 @@
-use lxmf::{
-    ConversationInfo, LxMessage, LxmfNode, StorageError, StoredMessage, DESTINATION_LENGTH,
-};
-use reticulum::iface::tcp_client::TcpClient;
-use reticulum::iface::tcp_server::TcpServer;
-use reticulum::iface::RxMessage;
-use reticulum::transport::{AnnounceEvent, ReceivedData};
-use reticulum::transport::{Transport, TransportConfig};
+use rinse::{AsyncNode, ServiceHandle};
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::Mutex;
 
-use crate::config::{Config, ConfigError};
-use crate::conversation::{ConversationManager, SqliteStorage};
+use crate::config::{Config, ConfigError, InterfaceConfig};
 use crate::identity::{Identity, IdentityError};
-use reticulum::transport::TransportStats;
 
 #[derive(Error, Debug)]
 pub enum AppError {
@@ -23,21 +14,13 @@ pub enum AppError {
     Identity(#[from] IdentityError),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
-    #[error("storage error: {0}")]
-    Storage(#[from] StorageError),
-    #[error("lxmf error: {0}")]
-    Lxmf(#[from] lxmf::Error),
 }
 
 pub struct NomadApp {
-    #[allow(dead_code)]
     config: Config,
-    transport: Arc<Transport>,
-    node: LxmfNode,
+    node: Arc<Mutex<AsyncNode>>,
+    service: Option<ServiceHandle>,
     dest_hash: [u8; 16],
-    conversations: ConversationManager<SqliteStorage>,
-    relay_enabled: bool,
-    stats: Arc<TransportStats>,
 }
 
 impl NomadApp {
@@ -48,68 +31,55 @@ impl NomadApp {
         log::info!("Identity loaded");
 
         let relay_enabled = config.network.relay;
-        let mut transport_config = TransportConfig::new("nomad", identity.inner().inner(), relay_enabled);
-        if relay_enabled {
-            transport_config.set_retransmit(true);
-            log::info!("Transport relay enabled - broadcasting and forwarding packets");
-        }
-        let transport = Transport::new(transport_config);
-        let stats = transport.stats();
-        let transport = Arc::new(transport);
+        let mut node = AsyncNode::new(relay_enabled);
 
-        let mut node = LxmfNode::new(identity.into_inner(), transport.clone());
-        let dest_hash = node.register_delivery_destination().await;
+        let service = node.add_service("nomadnetwork", &["/page/*"], identity.inner());
+        let dest_hash = service.address();
 
         log::info!("Our address: {}", hex::encode(dest_hash));
-
-        let storage_path = Config::data_dir()?.join("messages.db");
-        let storage = Arc::new(SqliteStorage::open(&storage_path)?);
-        let conversations = ConversationManager::new(storage.clone(), dest_hash);
-
-        log::info!("Message storage initialized at {:?}", storage_path);
 
         let enabled_interfaces = config.enabled_interfaces();
         if enabled_interfaces.is_empty() {
             log::warn!("No interfaces configured! Add interfaces to config.toml");
         }
 
-        if let Some(port) = config.network.listen_port {
-            let listen_addr = format!("0.0.0.0:{}", port);
-            log::info!("Listening on {}", listen_addr);
-
-            let iface_manager = transport.iface_manager();
-            let mut mgr = iface_manager.lock().await;
-            let inner = TcpServer::new(&listen_addr, iface_manager.clone());
-            let (context, _unreg) = mgr.new_context(inner, listen_addr);
-            tokio::spawn(TcpServer::spawn(context));
-        }
-
         for (name, iface_config) in &enabled_interfaces {
-            let addr = iface_config.address();
-            log::info!("Connecting to {} ({})", name, addr);
-
-            let iface_manager = transport.iface_manager();
-            iface_manager.lock().await.spawn(
-                TcpClient::new(&addr),
-                addr,
-                iface_manager.clone(),
-                TcpClient::spawn,
-            );
+            match iface_config {
+                InterfaceConfig::TCPClientInterface {
+                    target_host,
+                    target_port,
+                    ..
+                } => {
+                    let addr = format!("{}:{}", target_host, target_port);
+                    log::info!("Connecting to {} ({})", name, addr);
+                    if let Err(e) = node.connect(&addr).await {
+                        log::warn!("Failed to connect to {}: {}", addr, e);
+                    }
+                }
+                InterfaceConfig::TCPServerInterface {
+                    listen_ip,
+                    listen_port,
+                    ..
+                } => {
+                    let addr = format!("{}:{}", listen_ip, listen_port);
+                    log::info!("Starting TCP server {} ({})", name, addr);
+                    if let Err(e) = node.listen(&addr).await {
+                        log::warn!("Failed to listen on {}: {}", addr, e);
+                    }
+                }
+            }
         }
 
         if !enabled_interfaces.is_empty() {
-            node.announce().await;
+            service.announce();
             log::info!("Announced on network");
         }
 
         Ok(Self {
             config,
-            transport,
-            node,
+            node: Arc::new(Mutex::new(node)),
+            service: Some(service),
             dest_hash,
-            conversations,
-            relay_enabled,
-            stats,
         })
     }
 
@@ -117,86 +87,15 @@ impl NomadApp {
         self.dest_hash
     }
 
+    pub fn take_node(&mut self) -> Arc<Mutex<AsyncNode>> {
+        self.node.clone()
+    }
+
+    pub fn take_service(&mut self) -> ServiceHandle {
+        self.service.take().expect("service already taken")
+    }
+
     pub fn relay_enabled(&self) -> bool {
-        self.relay_enabled
-    }
-
-    pub fn stats(&self) -> &Arc<TransportStats> {
-        &self.stats
-    }
-
-    pub fn iface_rx(&self) -> tokio::sync::broadcast::Receiver<RxMessage> {
-        self.transport.iface_rx()
-    }
-
-    pub fn announce_events(&self) -> tokio::sync::broadcast::Receiver<AnnounceEvent> {
-        self.node.announce_events()
-    }
-
-    pub fn received_data_events(&self) -> tokio::sync::broadcast::Receiver<ReceivedData> {
-        self.node.received_data_events()
-    }
-
-    pub async fn announce(&self) {
-        self.node.announce().await;
-    }
-
-    pub fn delivery_destination(
-        &self,
-    ) -> Option<Arc<Mutex<reticulum::destination::SingleInputDestination>>> {
-        self.node.delivery_destination()
-    }
-
-    pub async fn handle_announce(&mut self, event: &AnnounceEvent) {
-        self.node.handle_announce(event).await;
-    }
-
-    pub fn handle_received_message(&mut self, data: &ReceivedData) -> Option<LxMessage> {
-        if let Some(msg) = self.node.handle_received_data(data) {
-            if let Err(e) = self.conversations.handle_incoming(&msg) {
-                log::error!("Failed to store incoming message: {}", e);
-            }
-            Some(msg)
-        } else {
-            None
-        }
-    }
-
-    pub async fn send_message(
-        &mut self,
-        destination: &[u8; DESTINATION_LENGTH],
-        content: &str,
-    ) -> Result<(), AppError> {
-        let mut msg =
-            LxMessage::new(*destination, self.dest_hash).with_content(content.as_bytes().to_vec());
-        msg.incoming = false;
-
-        self.node.send_message(&mut msg).await?;
-
-        self.conversations.handle_outgoing(&msg)?;
-
-        Ok(())
-    }
-
-    pub fn list_conversations(&self) -> Result<Vec<ConversationInfo>, StorageError> {
-        self.conversations.list_conversations()
-    }
-
-    pub fn get_conversation(
-        &self,
-        peer: &[u8; DESTINATION_LENGTH],
-    ) -> Result<Vec<StoredMessage>, StorageError> {
-        self.conversations.get_conversation(peer, None)
-    }
-
-    pub fn mark_conversation_read(
-        &self,
-        peer: &[u8; DESTINATION_LENGTH],
-    ) -> Result<(), StorageError> {
-        self.conversations.mark_conversation_read(peer)
-    }
-
-    pub fn transport(&self) -> &Arc<Transport> {
-        &self.transport
+        self.config.network.relay
     }
 }

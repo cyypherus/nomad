@@ -5,7 +5,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Widget},
 };
-use reticulum::transport::TransportStatsSnapshot;
+use rinse::StatsSnapshot;
 use std::collections::VecDeque;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -17,7 +17,7 @@ pub struct MyNodeView {
     node_name: String,
     last_announce_secs: u64,
     announce_button_area: Option<Rect>,
-    stats: Option<TransportStatsSnapshot>,
+    stats: Option<StatsSnapshot>,
     last_bytes_relayed: u64,
     bytes_per_sec_history: VecDeque<u64>,
     announces_received: u32,
@@ -26,7 +26,7 @@ pub struct MyNodeView {
 }
 
 impl MyNodeView {
-    pub fn new(node_hash: [u8; 16], relay_enabled: bool) -> Self {
+    pub fn new(node_hash: [u8; 16]) -> Self {
         Self {
             node_hash,
             node_name: "Anonymous Peer".to_string(),
@@ -37,8 +37,12 @@ impl MyNodeView {
             bytes_per_sec_history: VecDeque::with_capacity(HISTORY_SIZE),
             announces_received: 0,
             announces_sent: 0,
-            relay_enabled,
+            relay_enabled: false,
         }
+    }
+
+    pub fn set_relay_enabled(&mut self, enabled: bool) {
+        self.relay_enabled = enabled;
     }
 
     pub fn set_name(&mut self, name: String) {
@@ -53,7 +57,7 @@ impl MyNodeView {
         self.announces_sent += 1;
     }
 
-    pub fn set_stats(&mut self, stats: TransportStatsSnapshot) {
+    pub fn set_stats(&mut self, stats: StatsSnapshot) {
         let bytes_delta = stats.bytes_relayed.saturating_sub(self.last_bytes_relayed);
         self.last_bytes_relayed = stats.bytes_relayed;
 
@@ -274,10 +278,10 @@ impl MyNodeView {
         block.render(area, buf);
 
         let content = if let Some(ref stats) = self.stats {
-            let uptime = TransportStatsSnapshot::format_uptime(stats.uptime_secs);
-            let rx_bytes = TransportStatsSnapshot::format_bytes(stats.bytes_received);
-            let tx_bytes = TransportStatsSnapshot::format_bytes(stats.bytes_sent);
-            let relay_bytes = TransportStatsSnapshot::format_bytes(stats.bytes_relayed);
+            let uptime = StatsSnapshot::format_uptime(stats.uptime_secs);
+            let rx_bytes = StatsSnapshot::format_bytes(stats.bytes_received);
+            let tx_bytes = StatsSnapshot::format_bytes(stats.bytes_sent);
+            let relay_bytes = StatsSnapshot::format_bytes(stats.bytes_relayed);
 
             let chart_width = inner.width.saturating_sub(6) as usize;
             let sparkline = self.render_sparkline(chart_width);

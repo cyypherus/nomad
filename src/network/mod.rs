@@ -1,9 +1,7 @@
 mod client;
 mod node_registry;
-mod page_request;
 mod types;
 
 pub use client::NetworkClient;
 pub use node_registry::NodeRegistry;
-pub use page_request::{FetchRequest, PageStatus};
-pub use types::{IdentityInfo, NodeInfo, PeerInfo};
+pub use types::NodeInfo;

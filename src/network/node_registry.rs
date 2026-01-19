@@ -1,4 +1,4 @@
-use crate::network::types::{IdentityInfo, NodeInfo};
+use crate::network::types::NodeInfo;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;

@@ -1,4 +1,4 @@
-use lxmf::LxmfIdentity;
+use rinse::Identity as RinseIdentity;
 use std::fs;
 use std::path::PathBuf;
 use thiserror::Error;
@@ -16,7 +16,7 @@ pub enum IdentityError {
 }
 
 pub struct Identity {
-    inner: LxmfIdentity,
+    inner: RinseIdentity,
 }
 
 impl Identity {
@@ -34,14 +34,14 @@ impl Identity {
 
     pub fn generate() -> Self {
         Self {
-            inner: LxmfIdentity::generate(),
+            inner: RinseIdentity::generate(&mut rand::thread_rng()),
         }
     }
 
     fn load(path: &PathBuf) -> Result<Self, IdentityError> {
         let hex_str = fs::read_to_string(path)?;
-        let inner =
-            LxmfIdentity::from_hex(hex_str.trim()).map_err(|_| IdentityError::InvalidData)?;
+        let bytes = hex::decode(hex_str.trim()).map_err(|_| IdentityError::InvalidData)?;
+        let inner = RinseIdentity::from_bytes(&bytes).ok_or(IdentityError::InvalidData)?;
         Ok(Self { inner })
     }
 
@@ -50,7 +50,7 @@ impl Identity {
             fs::create_dir_all(parent)?;
         }
 
-        let hex_str = self.inner.to_hex();
+        let hex_str = hex::encode(self.inner.to_bytes());
         fs::write(path, hex_str)?;
         Ok(())
     }
@@ -59,11 +59,11 @@ impl Identity {
         Ok(Config::data_dir()?.join("identity"))
     }
 
-    pub fn inner(&self) -> &LxmfIdentity {
+    pub fn inner(&self) -> &RinseIdentity {
         &self.inner
     }
 
-    pub fn into_inner(self) -> LxmfIdentity {
+    pub fn into_inner(self) -> RinseIdentity {
         self.inner
     }
 }

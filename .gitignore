@@ -6,4 +6,3 @@ traces/
 *.DS_Store
 .cargo/
 .nomad/
-Cargo.lock

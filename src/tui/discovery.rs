@@ -16,6 +16,7 @@ pub enum ModalAction {
     None,
     Connect,
     Save,
+    Copy,
     Dismiss,
 }
 
@@ -53,7 +54,6 @@ impl DiscoveryView {
     pub fn add_node(&mut self, node: NodeInfo) {
         if let Some(existing) = self.nodes.iter_mut().find(|n| n.hash == node.hash) {
             existing.name = node.name;
-            existing.identity = node.identity;
         } else {
             self.nodes.push(node);
         }
@@ -77,7 +77,7 @@ impl DiscoveryView {
 
     pub fn select_next(&mut self) {
         if self.modal_open {
-            self.modal_selected = (self.modal_selected + 1) % 3;
+            self.modal_selected = (self.modal_selected + 1) % 4;
         } else if !self.nodes.is_empty() {
             self.selected = (self.selected + 1) % self.nodes.len();
             self.adjust_scroll();
@@ -87,7 +87,7 @@ impl DiscoveryView {
     pub fn select_prev(&mut self) {
         if self.modal_open {
             self.modal_selected = if self.modal_selected == 0 {
-                2
+                3
             } else {
                 self.modal_selected - 1
             };
@@ -108,10 +108,26 @@ impl DiscoveryView {
         }
     }
 
+    pub fn scroll_up(&mut self) {
+        if self.scroll_offset > 0 {
+            self.scroll_offset -= 1;
+        }
+    }
+
+    pub fn scroll_down(&mut self) {
+        if self.last_height == 0 {
+            return;
+        }
+        let max_scroll = self.nodes.len().saturating_sub(self.last_height);
+        if self.scroll_offset < max_scroll {
+            self.scroll_offset += 1;
+        }
+    }
+
     pub fn open_modal(&mut self) {
         if !self.nodes.is_empty() {
             self.modal_open = true;
-            self.modal_selected = 2;
+            self.modal_selected = 3;
         }
     }
 
@@ -125,8 +141,9 @@ impl DiscoveryView {
         }
         match self.modal_selected {
             0 => ModalAction::Dismiss,
-            1 => ModalAction::Save,
-            2 => ModalAction::Connect,
+            1 => ModalAction::Copy,
+            2 => ModalAction::Save,
+            3 => ModalAction::Connect,
             _ => ModalAction::None,
         }
     }
@@ -167,8 +184,9 @@ impl DiscoveryView {
         if let Some(idx) = modal.hit_test_buttons(x, y, self.last_modal_area) {
             match idx {
                 0 => ModalAction::Dismiss,
-                1 => ModalAction::Save,
-                2 => ModalAction::Connect,
+                1 => ModalAction::Copy,
+                2 => ModalAction::Save,
+                3 => ModalAction::Connect,
                 _ => ModalAction::None,
             }
         } else {
@@ -212,6 +230,7 @@ impl DiscoveryView {
             .content(content)
             .buttons(vec![
                 ModalButton::new("Cancel", Color::DarkGray),
+                ModalButton::new("Copy", Color::Cyan),
                 ModalButton::new("Save", Color::Green),
                 ModalButton::new("Connect", Color::Magenta),
             ])
@@ -263,34 +282,18 @@ impl DiscoveryView {
         let items: Vec<ListItem> = self
             .nodes
             .iter()
-            .enumerate()
             .skip(self.scroll_offset)
             .take(inner.height as usize)
-            .map(|(i, node)| {
-                let is_selected = i == self.selected;
-
-                let name_style = if is_selected {
-                    Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(Color::Gray)
-                };
-
+            .map(|node| {
                 let hash_short = format!("{}..{}", &node.hash_hex()[..6], &node.hash_hex()[26..]);
-                let hash_style = Style::default().fg(Color::DarkGray);
-
-                let prefix = if is_selected { "> " } else { "  " };
-                let prefix_style = if is_selected {
-                    Style::default().fg(Color::Magenta)
-                } else {
-                    Style::default()
-                };
 
                 ListItem::new(Line::from(vec![
-                    Span::styled(prefix, prefix_style),
-                    Span::styled(&node.name, name_style),
-                    Span::styled(format!("  {}", hash_short), hash_style),
+                    Span::styled(" \u{2022} ", Style::default().fg(Color::Magenta)),
+                    Span::styled(&node.name, Style::default().fg(Color::Gray)),
+                    Span::styled(
+                        format!("  {}", hash_short),
+                        Style::default().fg(Color::DarkGray),
+                    ),
                 ]))
             })
             .collect();

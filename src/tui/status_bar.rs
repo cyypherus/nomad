@@ -5,13 +5,11 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Paragraph, Widget},
 };
-use reticulum::transport::TransportStatsSnapshot;
-use std::time::Instant;
+use rinse::StatsSnapshot;
 
 pub struct StatusBar {
     status_message: Option<String>,
-    status_time: Option<Instant>,
-    relay_stats: Option<TransportStatsSnapshot>,
+    relay_stats: Option<StatsSnapshot>,
 }
 
 impl Default for StatusBar {
@@ -24,28 +22,23 @@ impl StatusBar {
     pub fn new() -> Self {
         Self {
             status_message: None,
-            status_time: None,
             relay_stats: None,
         }
     }
 
     pub fn set_status(&mut self, msg: String) {
         self.status_message = Some(msg);
-        self.status_time = Some(Instant::now());
     }
 
-    pub fn set_relay_stats(&mut self, stats: TransportStatsSnapshot) {
+    pub fn clear_status(&mut self) {
+        self.status_message = None;
+    }
+
+    pub fn set_relay_stats(&mut self, stats: StatsSnapshot) {
         self.relay_stats = Some(stats);
     }
 
-    pub fn tick(&mut self) {
-        if let Some(time) = self.status_time {
-            if time.elapsed().as_secs() > 3 {
-                self.status_message = None;
-                self.status_time = None;
-            }
-        }
-    }
+    pub fn tick(&mut self) {}
 }
 
 impl Widget for &StatusBar {
@@ -57,17 +50,27 @@ impl Widget for &StatusBar {
         }
 
         if let Some(ref msg) = self.status_message {
+            let max_chars = area.width.saturating_sub(2) as usize;
+            let char_count = msg.chars().count();
+            let display_msg = if char_count > max_chars {
+                let truncated: String = msg.chars().take(max_chars.saturating_sub(3)).collect();
+                format!("{}...", truncated)
+            } else {
+                msg.clone()
+            };
             let spans = vec![
                 Span::raw(" "),
                 Span::styled(
-                    msg.clone(),
+                    display_msg,
                     Style::default()
                         .fg(Color::Yellow)
                         .add_modifier(Modifier::BOLD),
                 ),
             ];
             let line = Line::from(spans);
-            Paragraph::new(line).render(Rect::new(area.x, area.y, area.width, 1), buf);
+            Paragraph::new(line)
+                .alignment(Alignment::Right)
+                .render(Rect::new(area.x, area.y, area.width, 1), buf);
         }
 
         if let Some(ref stats) = self.relay_stats {
@@ -75,10 +78,7 @@ impl Widget for &StatusBar {
                 let relay_line = Line::from(vec![
                     Span::styled("\u{2191}\u{2193}", Style::default().fg(Color::Magenta)),
                     Span::styled(
-                        format!(
-                            " {} ",
-                            TransportStatsSnapshot::format_bytes(stats.bytes_relayed)
-                        ),
+                        format!(" {} ", StatsSnapshot::format_bytes(stats.bytes_relayed)),
                         Style::default().fg(Color::White),
                     ),
                 ]);

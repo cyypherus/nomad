@@ -10,16 +10,18 @@ pub enum Tab {
     #[default]
     Discovery,
     Saved,
+    Browser,
     MyNode,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 3] = [Tab::Discovery, Tab::Saved, Tab::MyNode];
+    pub const ALL: [Tab; 4] = [Tab::Discovery, Tab::Saved, Tab::Browser, Tab::MyNode];
 
     pub fn title(&self) -> &'static str {
         match self {
             Tab::Discovery => "Discovery",
             Tab::Saved => "Saved",
+            Tab::Browser => "Browser",
             Tab::MyNode => "My Node",
         }
     }
@@ -27,7 +29,8 @@ impl Tab {
     pub fn next(&self) -> Tab {
         match self {
             Tab::Discovery => Tab::Saved,
-            Tab::Saved => Tab::MyNode,
+            Tab::Saved => Tab::Browser,
+            Tab::Browser => Tab::MyNode,
             Tab::MyNode => Tab::Discovery,
         }
     }
@@ -36,7 +39,8 @@ impl Tab {
         match self {
             Tab::Discovery => Tab::MyNode,
             Tab::Saved => Tab::Discovery,
-            Tab::MyNode => Tab::Saved,
+            Tab::Browser => Tab::Saved,
+            Tab::MyNode => Tab::Browser,
         }
     }
 }

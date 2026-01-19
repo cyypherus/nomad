@@ -1,5 +1,5 @@
 use crate::network::NodeInfo;
-use micronaut::{Browser, BrowserWidget, Interaction, Link, RatatuiRenderer};
+use micronaut::{Browser, Interaction, Link, RatatuiRenderer};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -59,6 +59,7 @@ impl BrowserView {
 
     pub fn set_loading(&mut self, url: String) {
         self.loading_url = Some(url);
+        self.browser.clear();
     }
 
     pub fn clear_loading(&mut self) {
@@ -253,7 +254,14 @@ impl Widget for &mut BrowserView {
         );
 
         self.last_content_area = content_area;
-        BrowserWidget::new(&mut self.browser).render(content_area, buf);
+        self.browser.resize(content_area.width, content_area.height);
+        if let Some(paragraph) = self.browser.render() {
+            paragraph.clone().render(content_area, buf);
+        } else {
+            Paragraph::new("No content")
+                .style(Style::default().fg(Color::DarkGray))
+                .render(content_area, buf);
+        }
 
         if let Some(link_url) = self.browser.selected_link() {
             if content_area.height > 1 {

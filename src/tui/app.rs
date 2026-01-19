@@ -12,7 +12,6 @@ use crossterm::{
         LeaveAlternateScreen,
     },
 };
-use lxmf::DESTINATION_LENGTH;
 use ratatui::{
     layout::{Constraint, Layout, Rect},
     prelude::{CrosstermBackend, Widget},
@@ -40,26 +39,16 @@ pub enum NetworkEvent {
     NodeAnnounce(NodeInfo),
     AnnounceSent,
     Status(String),
-    MessageReceived([u8; DESTINATION_LENGTH]),
-    ConversationsUpdated(Vec<lxmf::ConversationInfo>),
-    MessagesLoaded(Vec<lxmf::StoredMessage>),
     PageReceived { url: String, content: String },
     PageFailed { url: String, reason: String },
     DownloadComplete { filename: String, path: String },
     DownloadFailed { filename: String, reason: String },
-    RelayStats(reticulum::transport::TransportStatsSnapshot),
+    RelayStats(rinse::StatsSnapshot),
 }
 
 #[derive(Debug, Clone)]
 pub enum TuiCommand {
     Announce,
-    LoadConversations,
-    LoadMessages([u8; DESTINATION_LENGTH]),
-    SendMessage {
-        content: String,
-        destination: [u8; DESTINATION_LENGTH],
-    },
-    MarkConversationRead([u8; DESTINATION_LENGTH]),
     FetchPage {
         node: NodeInfo,
         path: String,
@@ -75,7 +64,6 @@ pub enum TuiCommand {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum AppMode {
     Normal,
-    Browser,
     Editing { field_name: String, masked: bool },
     ConfirmDownload { filename: String },
 }
@@ -137,6 +125,9 @@ impl TuiApp {
             saved.add_node(node);
         }
 
+        let mut mynode = MyNodeView::new(dest_hash);
+        mynode.set_relay_enabled(relay_enabled);
+
         Ok(Self {
             terminal,
             running: true,
@@ -145,7 +136,7 @@ impl TuiApp {
             mode: AppMode::Normal,
             discovery,
             saved,
-            mynode: MyNodeView::new(dest_hash, relay_enabled),
+            mynode,
             browser: BrowserView::new(),
             status_bar: StatusBar::new(),
             input: Input::default(),
@@ -186,6 +177,7 @@ impl TuiApp {
                 }
                 NetworkEvent::PageReceived { url, content } => {
                     self.browser.set_page_content(&url, &content);
+                    self.status_bar.clear_status();
                 }
                 NetworkEvent::PageFailed { url, reason } => {
                     self.browser.clear_loading();
@@ -200,9 +192,6 @@ impl TuiApp {
                     self.status_bar
                         .set_status(format!("Failed to download {}: {}", filename, reason));
                 }
-                NetworkEvent::MessageReceived(_)
-                | NetworkEvent::ConversationsUpdated(_)
-                | NetworkEvent::MessagesLoaded(_) => {}
                 NetworkEvent::RelayStats(stats) => {
                     self.mynode.set_stats(stats.clone());
                     self.status_bar.set_relay_stats(stats);
@@ -277,15 +266,11 @@ impl TuiApp {
 
             main_area = chunks[1];
 
-            match &mode {
-                AppMode::Normal => match tab {
-                    Tab::Discovery => frame.render_widget(&mut self.discovery, chunks[1]),
-                    Tab::Saved => frame.render_widget(&mut self.saved, chunks[1]),
-                    Tab::MyNode => frame.render_widget(&mut self.mynode, chunks[1]),
-                },
-                AppMode::Browser | AppMode::Editing { .. } | AppMode::ConfirmDownload { .. } => {
-                    frame.render_widget(&mut self.browser, chunks[1]);
-                }
+            match tab {
+                Tab::Discovery => frame.render_widget(&mut self.discovery, chunks[1]),
+                Tab::Saved => frame.render_widget(&mut self.saved, chunks[1]),
+                Tab::Browser => frame.render_widget(&mut self.browser, chunks[1]),
+                Tab::MyNode => frame.render_widget(&mut self.mynode, chunks[1]),
             }
 
             if let AppMode::Editing { field_name, masked } = &mode {
@@ -377,23 +362,11 @@ impl TuiApp {
                 Span::styled("[Esc]", Style::default().fg(Color::Magenta)),
                 Span::raw(" Cancel  "),
             ]),
-            AppMode::Browser => Line::from(vec![
-                Span::styled(" [Esc]", Style::default().fg(Color::Magenta)),
-                Span::raw(" Back  "),
-                Span::styled("[j/k]", Style::default().fg(Color::Magenta)),
-                Span::raw(" Scroll  "),
-                Span::styled("[Tab]", Style::default().fg(Color::Magenta)),
-                Span::raw(" Next  "),
-                Span::styled("[Enter]", Style::default().fg(Color::Magenta)),
-                Span::raw(" Activate  "),
-                Span::styled("[r]", Style::default().fg(Color::Magenta)),
-                Span::raw(" Reload  "),
-            ]),
             AppMode::Normal => match self.tab {
                 Tab::Discovery => {
                     if self.discovery.is_modal_open() {
                         Line::from(vec![
-                            Span::styled(" [Tab]", Style::default().fg(Color::Magenta)),
+                            Span::styled(" [j/k]", Style::default().fg(Color::Magenta)),
                             Span::raw(" Switch  "),
                             Span::styled("[Enter]", Style::default().fg(Color::Magenta)),
                             Span::raw(" Select  "),
@@ -425,6 +398,18 @@ impl TuiApp {
                     Span::styled("[q]", Style::default().fg(Color::Magenta)),
                     Span::raw(" Quit  "),
                 ]),
+                Tab::Browser => Line::from(vec![
+                    Span::styled(" [j/k]", Style::default().fg(Color::Magenta)),
+                    Span::raw(" Scroll  "),
+                    Span::styled("[Tab]", Style::default().fg(Color::Magenta)),
+                    Span::raw(" Next Link  "),
+                    Span::styled("[Enter]", Style::default().fg(Color::Magenta)),
+                    Span::raw(" Activate  "),
+                    Span::styled("[r]", Style::default().fg(Color::Magenta)),
+                    Span::raw(" Reload  "),
+                    Span::styled("[q]", Style::default().fg(Color::Magenta)),
+                    Span::raw(" Quit  "),
+                ]),
                 Tab::MyNode => Line::from(vec![
                     Span::styled(" [a]", Style::default().fg(Color::Magenta)),
                     Span::raw(" Announce  "),
@@ -442,16 +427,14 @@ impl TuiApp {
             return Ok(());
         }
 
-        let evt = event::read()?;
+        while event::poll(Duration::ZERO)? {
+            let evt = event::read()?;
 
-        if let Event::Key(key) = &evt {
-            if key.kind != KeyEventKind::Press {
-                return Ok(());
-            }
-        }
+            if let Event::Key(key) = &evt {
+                if key.kind != KeyEventKind::Press {
+                    continue;
+                }
 
-        match &evt {
-            Event::Key(key) => {
                 let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
                 if key.code == KeyCode::Char('c') && ctrl {
@@ -462,14 +445,11 @@ impl TuiApp {
                 match &self.mode {
                     AppMode::Editing { .. } => self.handle_editing_key(&evt),
                     AppMode::ConfirmDownload { .. } => self.handle_download_key(key.code),
-                    AppMode::Browser => self.handle_browser_key(key.code),
                     AppMode::Normal => self.handle_normal_key(key.code, ctrl),
                 }
-            }
-            Event::Mouse(mouse) => {
+            } else if let Event::Mouse(mouse) = &evt {
                 self.handle_mouse(mouse.kind, mouse.column, mouse.row);
             }
-            _ => {}
         }
 
         Ok(())
@@ -504,6 +484,33 @@ impl TuiApp {
             return;
         }
 
+        if self.tab == Tab::Browser {
+            match code {
+                KeyCode::Char('q') => self.running = false,
+                KeyCode::Down | KeyCode::Char('j') => self.browser.scroll_down(),
+                KeyCode::Up | KeyCode::Char('k') => self.browser.scroll_up(),
+                KeyCode::PageDown => self.browser.scroll_page_down(),
+                KeyCode::PageUp => self.browser.scroll_page_up(),
+                KeyCode::Tab => self.browser.select_next(),
+                KeyCode::BackTab => self.browser.select_prev(),
+                KeyCode::Left => self.browser.select_prev(),
+                KeyCode::Right => self.browser.select_next(),
+                KeyCode::Enter => {
+                    if let Some(interaction) = self.browser.interact() {
+                        self.handle_interaction(interaction);
+                    }
+                }
+                KeyCode::Backspace => {
+                    self.browser.go_back();
+                }
+                KeyCode::Char('r') => {
+                    self.reload_page();
+                }
+                _ => {}
+            }
+            return;
+        }
+
         match code {
             KeyCode::Char('q') => self.running = false,
             KeyCode::Tab => {
@@ -519,34 +526,6 @@ impl TuiApp {
             KeyCode::Enter => self.handle_enter(),
             KeyCode::Char('a') => self.handle_announce(),
             KeyCode::Char('d') => self.handle_delete(),
-            _ => {}
-        }
-    }
-
-    fn handle_browser_key(&mut self, code: KeyCode) {
-        match code {
-            KeyCode::Esc => {
-                self.mode = AppMode::Normal;
-            }
-            KeyCode::Down | KeyCode::Char('j') => self.browser.scroll_down(),
-            KeyCode::Up | KeyCode::Char('k') => self.browser.scroll_up(),
-            KeyCode::PageDown => self.browser.scroll_page_down(),
-            KeyCode::PageUp => self.browser.scroll_page_up(),
-            KeyCode::Tab => self.browser.select_next(),
-            KeyCode::BackTab => self.browser.select_prev(),
-            KeyCode::Left => self.browser.select_prev(),
-            KeyCode::Right => self.browser.select_next(),
-            KeyCode::Enter => {
-                if let Some(interaction) = self.browser.interact() {
-                    self.handle_interaction(interaction);
-                }
-            }
-            KeyCode::Backspace => {
-                self.browser.go_back();
-            }
-            KeyCode::Char('r') => {
-                self.reload_page();
-            }
             _ => {}
         }
     }
@@ -574,12 +553,12 @@ impl TuiApp {
             self.browser.set_field_value(&name, value);
         }
         self.input.reset();
-        self.mode = AppMode::Browser;
+        self.mode = AppMode::Normal;
     }
 
     fn cancel_edit(&mut self) {
         self.input.reset();
-        self.mode = AppMode::Browser;
+        self.mode = AppMode::Normal;
     }
 
     fn handle_edit_modal_click(&mut self, x: u16, y: u16) {
@@ -645,12 +624,12 @@ impl TuiApp {
                 filename: download.filename,
             });
         }
-        self.mode = AppMode::Browser;
+        self.mode = AppMode::Normal;
     }
 
     fn cancel_download(&mut self) {
         self.pending_download = None;
-        self.mode = AppMode::Browser;
+        self.mode = AppMode::Normal;
     }
 
     fn handle_interaction(&mut self, interaction: micronaut::Interaction) {
@@ -699,24 +678,6 @@ impl TuiApp {
                 }
 
                 match &self.mode {
-                    AppMode::Browser => {
-                        use super::browser_view::NavAction;
-                        if let Some(nav) = self.browser.click_nav(x, y) {
-                            match nav {
-                                NavAction::Back => {
-                                    self.browser.go_back();
-                                }
-                                NavAction::Forward => {
-                                    self.browser.go_forward();
-                                }
-                                NavAction::Reload => {
-                                    self.reload_page();
-                                }
-                            }
-                        } else if let Some(interaction) = self.browser.click(x, y) {
-                            self.handle_interaction(interaction);
-                        }
-                    }
                     AppMode::Editing { .. } => {
                         self.handle_edit_modal_click(x, y);
                     }
@@ -755,6 +716,24 @@ impl TuiApp {
                                     self.handle_saved_modal_action(action);
                                 }
                             }
+                            Tab::Browser => {
+                                use super::browser_view::NavAction;
+                                if let Some(nav) = self.browser.click_nav(x, y) {
+                                    match nav {
+                                        NavAction::Back => {
+                                            self.browser.go_back();
+                                        }
+                                        NavAction::Forward => {
+                                            self.browser.go_forward();
+                                        }
+                                        NavAction::Reload => {
+                                            self.reload_page();
+                                        }
+                                    }
+                                } else if let Some(interaction) = self.browser.click(x, y) {
+                                    self.handle_interaction(interaction);
+                                }
+                            }
                             Tab::MyNode => {
                                 if self.mynode.click(x, y) {
                                     self.send_announce();
@@ -765,12 +744,12 @@ impl TuiApp {
                 }
             }
             MouseEventKind::ScrollUp => match &self.mode {
-                AppMode::Browser => self.browser.scroll_up(),
+                AppMode::Normal if self.tab == Tab::Browser => self.browser.scroll_up(),
                 AppMode::Normal => self.handle_up(),
                 AppMode::Editing { .. } | AppMode::ConfirmDownload { .. } => {}
             },
             MouseEventKind::ScrollDown => match &self.mode {
-                AppMode::Browser => self.browser.scroll_down(),
+                AppMode::Normal if self.tab == Tab::Browser => self.browser.scroll_down(),
                 AppMode::Normal => self.handle_down(),
                 AppMode::Editing { .. } | AppMode::ConfirmDownload { .. } => {}
             },
@@ -780,17 +759,17 @@ impl TuiApp {
 
     fn handle_down(&mut self) {
         match self.tab {
-            Tab::Discovery => self.discovery.select_next(),
-            Tab::Saved => self.saved.select_next(),
-            Tab::MyNode => {}
+            Tab::Discovery => self.discovery.scroll_down(),
+            Tab::Saved => self.saved.scroll_down(),
+            Tab::Browser | Tab::MyNode => {}
         }
     }
 
     fn handle_up(&mut self) {
         match self.tab {
-            Tab::Discovery => self.discovery.select_prev(),
-            Tab::Saved => self.saved.select_prev(),
-            Tab::MyNode => {}
+            Tab::Discovery => self.discovery.scroll_up(),
+            Tab::Saved => self.saved.scroll_up(),
+            Tab::Browser | Tab::MyNode => {}
         }
     }
 
@@ -802,6 +781,7 @@ impl TuiApp {
             Tab::Saved => {
                 self.saved.open_modal();
             }
+            Tab::Browser => {}
             Tab::MyNode => {
                 self.send_announce();
             }
@@ -821,6 +801,11 @@ impl TuiApp {
                     self.saved.add_node(node);
                     self.discovery.close_modal();
                     self.status_bar.set_status("Node saved".into());
+                }
+            }
+            ModalAction::Copy => {
+                if let Some(node) = self.discovery.selected_node() {
+                    self.copy_to_clipboard(&node.hash_hex());
                 }
             }
             ModalAction::Dismiss => {
@@ -845,6 +830,11 @@ impl TuiApp {
                         .set_status(format!("Removed {}", removed.name));
                 }
             }
+            SavedModalAction::Copy => {
+                if let Some(node) = self.saved.selected_node() {
+                    self.copy_to_clipboard(&node.hash_hex());
+                }
+            }
             SavedModalAction::Cancel => {
                 self.saved.close_modal();
             }
@@ -855,7 +845,9 @@ impl TuiApp {
     fn connect_to_node(&mut self, node: &NodeInfo) {
         let path = "/page/index.mu".to_string();
         self.browser.set_current_node(node.clone());
-        self.mode = AppMode::Browser;
+        self.browser.set_loading(path.clone());
+        self.tab = Tab::Browser;
+        self.tab_bar = TabBar::new(Tab::Browser);
 
         let _ = self.cmd_tx.blocking_send(TuiCommand::FetchPage {
             node: node.clone(),
@@ -926,6 +918,17 @@ impl TuiApp {
     fn handle_delete(&mut self) {
         if self.tab == Tab::Saved {
             self.saved.open_delete_modal();
+        }
+    }
+
+    fn copy_to_clipboard(&mut self, text: &str) {
+        match cli_clipboard::set_contents(text.to_owned()) {
+            Ok(()) => {
+                self.status_bar.set_status("Copied to clipboard".into());
+            }
+            Err(e) => {
+                self.status_bar.set_status(format!("Failed to copy: {}", e));
+            }
         }
     }
 }
