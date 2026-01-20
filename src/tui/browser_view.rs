@@ -246,11 +246,18 @@ impl Widget for &mut BrowserView {
         )))
         .render(divider_area, buf);
 
+        let link_bar_area = Rect::new(
+            inner.x,
+            inner.y + inner.height.saturating_sub(1),
+            inner.width,
+            1,
+        );
+
         let content_area = Rect::new(
             inner.x,
             inner.y + 2,
             inner.width,
-            inner.height.saturating_sub(2),
+            inner.height.saturating_sub(3),
         );
 
         self.last_content_area = content_area;
@@ -263,15 +270,13 @@ impl Widget for &mut BrowserView {
                 .render(content_area, buf);
         }
 
-        if let Some(link_url) = self.browser.selected_link() {
-            if content_area.height > 1 {
-                let status_y = content_area.y + content_area.height - 1;
-                let status_area = Rect::new(content_area.x, status_y, content_area.width, 1);
-                let status_text = format!("\u{2192} {}", link_url);
-                Paragraph::new(status_text)
-                    .style(Style::default().fg(Color::DarkGray).bg(Color::Black))
-                    .render(status_area, buf);
-            }
-        }
+        let link_text = self
+            .browser
+            .selected_link()
+            .map(|url| format!("\u{2192} {}", url))
+            .unwrap_or_default();
+        Paragraph::new(link_text)
+            .style(Style::default().fg(Color::DarkGray))
+            .render(link_bar_area, buf);
     }
 }

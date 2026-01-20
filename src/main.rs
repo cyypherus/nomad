@@ -8,14 +8,15 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::sync::Arc;
 
-use rinse::RequestError;
+use rinse::{AsyncTcpTransport, Interface, RequestError, ServiceEvent};
 
 use tokio::sync::{mpsc, oneshot};
 
 use app::NomadApp;
+use config::{Config, InterfaceConfig};
 use network::{NetworkClient, NodeRegistry};
 use simplelog::{Config as LogConfig, LevelFilter, WriteLogger};
-use tui::{NetworkEvent, TuiApp, TuiCommand};
+use tui::{InterfaceInfo, InterfaceKind, NetworkEvent, TuiApp, TuiCommand};
 
 struct FetchReq {
     dest: [u8; 16],
@@ -29,6 +30,40 @@ enum InternalCmd {
     GetStats(oneshot::Sender<rinse::StatsSnapshot>),
 }
 
+fn build_interface_info(config: &Config, status: &HashMap<String, bool>) -> Vec<InterfaceInfo> {
+    config
+        .enabled_interfaces()
+        .iter()
+        .map(|(name, iface_config)| {
+            let (kind, address) = match iface_config {
+                InterfaceConfig::TCPClientInterface {
+                    target_host,
+                    target_port,
+                    ..
+                } => (
+                    InterfaceKind::TcpClient,
+                    format!("{}:{}", target_host, target_port),
+                ),
+                InterfaceConfig::TCPServerInterface {
+                    listen_ip,
+                    listen_port,
+                    ..
+                } => (
+                    InterfaceKind::TcpServer,
+                    format!("{}:{}", listen_ip, listen_port),
+                ),
+            };
+            let connected = status.get(*name).copied().unwrap_or(false);
+            InterfaceInfo {
+                name: name.to_string(),
+                kind,
+                address,
+                connected,
+            }
+        })
+        .collect()
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(".nomad")?;
@@ -37,14 +72,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     log::info!("Starting Nomad...");
 
-    let (node, mut service, requester, dest_hash, relay_enabled) = {
+    let config = Config::load()?;
+    let interface_configs: HashMap<String, InterfaceConfig> = config
+        .enabled_interfaces()
+        .into_iter()
+        .map(|(name, cfg)| (name.to_string(), cfg.clone()))
+        .collect();
+
+    let (node, service_id, dest_hash, relay_enabled, interface_info) = {
         let mut nomad = NomadApp::new().await?;
         let dest_hash = nomad.dest_hash();
         let relay_enabled = nomad.relay_enabled();
+        let interface_info = build_interface_info(&config, nomad.interface_status());
         let node = nomad.take_node();
-        let service = nomad.take_service();
-        let requester = service.requester();
-        (node, service, requester, dest_hash, relay_enabled)
+        let service_id = nomad.take_service_id();
+        (node, service_id, dest_hash, relay_enabled, interface_info)
     };
 
     let (event_tx, event_rx) = mpsc::channel::<NetworkEvent>(100);
@@ -60,15 +102,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let event_tx_clone = event_tx.clone();
     let internal_tx_stats = internal_tx.clone();
 
+    let node_for_run = Arc::try_unwrap(node)
+        .ok()
+        .expect("node still has multiple references")
+        .into_inner();
+    let node_clone = node_for_run.clone();
+
     let node_task = tokio::spawn(async move {
-        let node = Arc::try_unwrap(node)
-            .ok()
-            .expect("node still has multiple references")
-            .into_inner();
-        node.run().await;
+        node_for_run.run().await;
     });
 
+    let node = Arc::new(node_clone);
+    let node_for_network = node.clone();
+    let node_for_receive = node.clone();
+
     let network_task = tokio::spawn(async move {
+        let node = node_for_network;
         loop {
             tokio::select! {
                 _ = shutdown_rx.recv() => {
@@ -80,13 +129,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         TuiCommand::Announce => {
                             let _ = event_tx_clone.send(NetworkEvent::Status("Announcing...".to_string())).await;
                             log::info!("Announce command received");
-                            service.announce();
+                            node.announce(service_id);
                             log::info!("Announce completed");
                             let _ = event_tx_clone.send(NetworkEvent::AnnounceSent).await;
                         }
-                        TuiCommand::FetchPage { node, path, form_data } => {
-                            log::info!("FetchPage command received: {} path={}", node.hash_hex(), path);
-                            let url = format!("{}:{}", node.hash_hex(), path);
+                        TuiCommand::FetchPage { node: target_node, path, form_data } => {
+                            log::info!("FetchPage command received: {} path={}", target_node.hash_hex(), path);
+                            let url = format!("{}:{}", target_node.hash_hex(), path);
                             let event_tx = event_tx_clone.clone();
                             let internal_tx = internal_tx.clone();
 
@@ -97,7 +146,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let (reply_tx, reply_rx) = oneshot::channel();
                                 log::info!("Sending InternalCmd::Fetch");
                                 let _ = internal_tx.send(InternalCmd::Fetch(FetchReq {
-                                    dest: node.hash,
+                                    dest: target_node.hash,
                                     path: path.clone(),
                                     form_data,
                                     reply: reply_tx,
@@ -108,8 +157,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                                 match reply_rx.await {
                                     Ok(Ok(data)) => {
-                                        let content = String::from_utf8_lossy(&data).into_owned();
-                                        let _ = event_tx.send(NetworkEvent::PageReceived { url, content }).await;
+                                        let _ = event_tx.send(NetworkEvent::PageReceived { url, data }).await;
                                     }
                                     Ok(Err(e)) => {
                                         let _ = event_tx.send(NetworkEvent::PageFailed { url, reason: e }).await;
@@ -120,8 +168,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             });
                         }
-                        TuiCommand::DownloadFile { node, path, filename } => {
-                            log::info!("Download requested: {} from {} path={}", filename, node.name, path);
+                        TuiCommand::DownloadFile { node: target_node, path, filename } => {
+                            log::info!("Download requested: {} from {} path={}", filename, target_node.name, path);
                             let event_tx = event_tx_clone.clone();
                             let internal_tx = internal_tx.clone();
 
@@ -130,7 +178,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                                 let (reply_tx, reply_rx) = oneshot::channel();
                                 let _ = internal_tx.send(InternalCmd::Fetch(FetchReq {
-                                    dest: node.hash,
+                                    dest: target_node.hash,
                                     path,
                                     form_data: HashMap::new(),
                                     reply: reply_tx,
@@ -182,6 +230,60 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             });
                         }
+                        TuiCommand::Reconnect { name } => {
+                            log::info!("Reconnect requested for interface: {}", name);
+                            if let Some(iface_config) = interface_configs.get(&name) {
+                                let addr = match iface_config {
+                                    InterfaceConfig::TCPClientInterface { target_host, target_port, .. } => {
+                                        format!("{}:{}", target_host, target_port)
+                                    }
+                                    InterfaceConfig::TCPServerInterface { listen_ip, listen_port, .. } => {
+                                        format!("{}:{}", listen_ip, listen_port)
+                                    }
+                                };
+                                let event_tx = event_tx_clone.clone();
+                                let name_clone = name.clone();
+                                let node = node.clone();
+                                tokio::spawn(async move {
+                                    let _ = event_tx.send(NetworkEvent::Status(
+                                        format!("Connecting to {}...", name_clone)
+                                    )).await;
+                                    match AsyncTcpTransport::connect(&addr).await {
+                                        Ok(transport) => {
+                                            node.add_interface(Interface::new(transport));
+                                            log::info!("Reconnected to {}", name_clone);
+                                            let _ = event_tx.send(NetworkEvent::InterfaceStatus {
+                                                name: name_clone.clone(),
+                                                connected: true,
+                                            }).await;
+                                            let _ = event_tx.send(NetworkEvent::Status(
+                                                format!("Connected to {}", name_clone)
+                                            )).await;
+                                        }
+                                        Err(e) => {
+                                            log::warn!("Failed to reconnect to {}: {}", name_clone, e);
+                                            let _ = event_tx.send(NetworkEvent::InterfaceStatus {
+                                                name: name_clone.clone(),
+                                                connected: false,
+                                            }).await;
+                                            let _ = event_tx.send(NetworkEvent::Status(
+                                                format!("Failed to connect to {}: {}", name_clone, e)
+                                            )).await;
+                                        }
+                                    }
+                                });
+                            } else {
+                                log::warn!("Unknown interface: {}", name);
+                            }
+                        }
+                        TuiCommand::SaveNode { node: target_node } => {
+                            log::info!("Saving node: {} ({})", target_node.name, target_node.hash_hex());
+                            network_client_clone.registry_mut().await.save(target_node);
+                        }
+                        TuiCommand::RemoveNode { hash } => {
+                            log::info!("Removing node: {}", hex::encode(hash));
+                            network_client_clone.registry_mut().await.remove(&hash);
+                        }
                     }
                 }
                 Some(cmd) = internal_rx.recv() => {
@@ -189,15 +291,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         InternalCmd::Fetch(req) => {
                             log::info!("Processing fetch request: dest={} path={}", hex::encode(req.dest), req.path);
                             let request_data = build_page_request(&req.form_data);
-                            let requester = requester.clone();
+                            let node = node.clone();
                             let path = req.path.clone();
 
                             tokio::spawn(async move {
-                                log::info!("Calling requester.request()");
-                                let result = match requester.request(req.dest, &path, &request_data).await {
-                                    Ok(response) => {
+                                log::info!("Calling node.request()");
+                                let result = match node.request(service_id, req.dest, &path, &request_data).await {
+                                    Ok((response, _metadata)) => {
                                         log::info!("Got response: {} bytes", response.len());
-                                        parse_response(&response)
+                                        Ok(response)
                                     }
                                     Err(e) => {
                                         log::error!("Request failed: {:?}", e);
@@ -215,14 +317,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             });
                         }
                         InternalCmd::GetStats(reply) => {
-                            let stats = service.stats().await;
+                            let stats = node.stats().await;
                             let _ = reply.send(stats);
                         }
                     }
                 }
-                Some(destinations) = service.recv_destinations_changed() => {
-                    network_client_clone.handle_destinations_changed(destinations).await;
+            }
+        }
+    });
+
+    let network_client_for_receive = network_client.clone();
+    let event_tx_receive = event_tx.clone();
+    let receive_task = tokio::spawn(async move {
+        loop {
+            match node_for_receive.receive(service_id).await {
+                Some(ServiceEvent::DestinationsChanged) => {
+                    let destinations = node_for_receive.known_destinations().await;
+                    network_client_for_receive
+                        .handle_destinations_changed(destinations)
+                        .await;
                 }
+                Some(ServiceEvent::ResourceProgress {
+                    received_bytes,
+                    total_bytes,
+                    ..
+                }) => {
+                    let _ = event_tx_receive
+                        .send(NetworkEvent::ResourceProgress {
+                            received_bytes,
+                            total_bytes,
+                        })
+                        .await;
+                }
+                _ => {}
             }
         }
     });
@@ -257,7 +384,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let tui_result = tokio::task::spawn_blocking(move || {
-        let mut tui = TuiApp::new(dest_hash, initial_nodes, relay_enabled, event_rx, cmd_tx)?;
+        let mut tui = TuiApp::new(
+            dest_hash,
+            initial_nodes,
+            relay_enabled,
+            interface_info,
+            event_rx,
+            cmd_tx,
+        )?;
         tui.run()
     })
     .await?;
@@ -266,6 +400,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = network_task.await;
     announce_task.abort();
     stats_task.abort();
+    receive_task.abort();
     node_task.abort();
 
     tui_result?;
@@ -278,18 +413,4 @@ fn build_page_request(form_data: &HashMap<String, String>) -> Vec<u8> {
     } else {
         rmp_serde::to_vec(form_data).unwrap_or_default()
     }
-}
-
-fn parse_response(data: &[u8]) -> Result<Vec<u8>, String> {
-    if let Ok(response) = rmp_serde::from_slice::<(f64, Vec<u8>, Option<Vec<u8>>)>(data) {
-        return response.2.ok_or_else(|| "No content in response".into());
-    }
-
-    if let Ok(response) =
-        rmp_serde::from_slice::<(serde_bytes::ByteBuf, serde_bytes::ByteBuf)>(data)
-    {
-        return Ok(response.1.to_vec());
-    }
-
-    Ok(data.to_vec())
 }

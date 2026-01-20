@@ -12,10 +12,17 @@ pub enum Tab {
     Saved,
     Browser,
     MyNode,
+    Interfaces,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 4] = [Tab::Discovery, Tab::Saved, Tab::Browser, Tab::MyNode];
+    pub const ALL: [Tab; 5] = [
+        Tab::Discovery,
+        Tab::Saved,
+        Tab::Browser,
+        Tab::MyNode,
+        Tab::Interfaces,
+    ];
 
     pub fn title(&self) -> &'static str {
         match self {
@@ -23,6 +30,7 @@ impl Tab {
             Tab::Saved => "Saved",
             Tab::Browser => "Browser",
             Tab::MyNode => "My Node",
+            Tab::Interfaces => "Interfaces",
         }
     }
 
@@ -31,16 +39,18 @@ impl Tab {
             Tab::Discovery => Tab::Saved,
             Tab::Saved => Tab::Browser,
             Tab::Browser => Tab::MyNode,
-            Tab::MyNode => Tab::Discovery,
+            Tab::MyNode => Tab::Interfaces,
+            Tab::Interfaces => Tab::Discovery,
         }
     }
 
     pub fn prev(&self) -> Tab {
         match self {
-            Tab::Discovery => Tab::MyNode,
+            Tab::Discovery => Tab::Interfaces,
             Tab::Saved => Tab::Discovery,
             Tab::Browser => Tab::Saved,
             Tab::MyNode => Tab::Browser,
+            Tab::Interfaces => Tab::MyNode,
         }
     }
 }

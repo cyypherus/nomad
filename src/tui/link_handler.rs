@@ -137,10 +137,6 @@ mod tests {
         NodeInfo {
             name: name.to_string(),
             hash,
-            identity: crate::network::IdentityInfo {
-                public_key: [0; 32],
-                signature: [0; 64],
-            },
         }
     }
 

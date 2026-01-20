@@ -1,9 +1,9 @@
 use crate::network::node_registry::NodeRegistry;
 use crate::network::types::NodeInfo;
 
-use rinse::{Address, AspectHash, AsyncDestination};
+use rinse::{Address, AspectHash, Destination};
 
-use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
 
@@ -11,7 +11,7 @@ const NODE_ASPECT_NAME: &str = "nomadnetwork.node";
 
 pub struct NetworkClient {
     registry: Arc<RwLock<NodeRegistry>>,
-    known_destinations: Arc<RwLock<HashMap<Address, AsyncDestination>>>,
+    known_addresses: Arc<RwLock<HashSet<Address>>>,
     node_announce_tx: broadcast::Sender<NodeInfo>,
 }
 
@@ -21,7 +21,7 @@ impl NetworkClient {
 
         Self {
             registry: Arc::new(RwLock::new(registry)),
-            known_destinations: Arc::new(RwLock::new(HashMap::new())),
+            known_addresses: Arc::new(RwLock::new(HashSet::new())),
             node_announce_tx,
         }
     }
@@ -30,20 +30,18 @@ impl NetworkClient {
         self.node_announce_tx.subscribe()
     }
 
-    pub async fn handle_destinations_changed(&self, destinations: Vec<AsyncDestination>) {
-        let mut known = self.known_destinations.write().await;
+    pub async fn handle_destinations_changed(&self, destinations: Vec<Destination>) {
+        let mut known = self.known_addresses.write().await;
         let node_aspect = AspectHash::from_name(NODE_ASPECT_NAME);
 
         for dest in destinations {
-            // Filter by aspect - only accept nomadnetwork.node announces
             if dest.aspect != node_aspect {
                 continue;
             }
 
-            let is_new = !known.contains_key(&dest.address);
+            let is_new = !known.contains(&dest.address);
 
             if is_new {
-                // Only accept nodes with valid NomadNet app_data
                 let name = match dest
                     .app_data
                     .as_ref()
@@ -51,8 +49,7 @@ impl NetworkClient {
                 {
                     Some(name) => name,
                     None => {
-                        // Has correct aspect but no valid name, skip it
-                        known.insert(dest.address, dest);
+                        known.insert(dest.address);
                         continue;
                     }
                 };
@@ -62,7 +59,7 @@ impl NetworkClient {
                     name,
                 };
 
-                known.insert(dest.address, dest);
+                known.insert(dest.address);
 
                 {
                     let mut reg = self.registry.write().await;
@@ -87,7 +84,7 @@ impl Clone for NetworkClient {
     fn clone(&self) -> Self {
         Self {
             registry: self.registry.clone(),
-            known_destinations: self.known_destinations.clone(),
+            known_addresses: self.known_addresses.clone(),
             node_announce_tx: self.node_announce_tx.clone(),
         }
     }

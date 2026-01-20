@@ -59,6 +59,14 @@ impl NodeRegistry {
         }
     }
 
+    pub fn remove(&mut self, hash: &[u8; 16]) -> Option<NodeInfo> {
+        let removed = self.nodes.remove(hash);
+        if removed.is_some() {
+            self.persist();
+        }
+        removed
+    }
+
     fn persist(&self) {
         let file = NodesFile {
             nodes: self.nodes.values().cloned().collect(),

@@ -39,6 +39,23 @@ impl StatusBar {
     }
 
     pub fn tick(&mut self) {}
+
+    pub fn required_width(&self) -> u16 {
+        let status_width = self
+            .status_message
+            .as_ref()
+            .map(|m| m.chars().count() + 2)
+            .unwrap_or(0);
+
+        let relay_width = self
+            .relay_stats
+            .as_ref()
+            .filter(|s| s.packets_relayed > 0 || s.announces_relayed > 0)
+            .map(|s| StatsSnapshot::format_bytes(s.bytes_relayed).len() + 4)
+            .unwrap_or(0);
+
+        status_width.max(relay_width) as u16
+    }
 }
 
 impl Widget for &StatusBar {

@@ -26,6 +26,7 @@ use tui_input::Input;
 
 use super::browser_view::BrowserView;
 use super::discovery::{DiscoveryView, ModalAction};
+use super::interfaces::{InterfaceInfo, InterfacesView};
 use super::modal::{Modal, ModalButton};
 use super::mynode::MyNodeView;
 use super::saved::{SavedModalAction, SavedView};
@@ -39,11 +40,31 @@ pub enum NetworkEvent {
     NodeAnnounce(NodeInfo),
     AnnounceSent,
     Status(String),
-    PageReceived { url: String, content: String },
-    PageFailed { url: String, reason: String },
-    DownloadComplete { filename: String, path: String },
-    DownloadFailed { filename: String, reason: String },
+    PageReceived {
+        url: String,
+        data: Vec<u8>,
+    },
+    PageFailed {
+        url: String,
+        reason: String,
+    },
+    DownloadComplete {
+        filename: String,
+        path: String,
+    },
+    DownloadFailed {
+        filename: String,
+        reason: String,
+    },
     RelayStats(rinse::StatsSnapshot),
+    ResourceProgress {
+        received_bytes: usize,
+        total_bytes: usize,
+    },
+    InterfaceStatus {
+        name: String,
+        connected: bool,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -58,6 +79,15 @@ pub enum TuiCommand {
         node: NodeInfo,
         path: String,
         filename: String,
+    },
+    Reconnect {
+        name: String,
+    },
+    SaveNode {
+        node: NodeInfo,
+    },
+    RemoveNode {
+        hash: [u8; 16],
     },
 }
 
@@ -86,6 +116,7 @@ pub struct TuiApp {
     saved: SavedView,
     mynode: MyNodeView,
     browser: BrowserView,
+    interfaces: InterfacesView,
     status_bar: StatusBar,
     input: Input,
     last_edit_popup_area: Rect,
@@ -98,11 +129,29 @@ pub struct TuiApp {
     last_main_area: Rect,
 }
 
+fn truncate_filename(name: &str, max_len: usize) -> String {
+    if name.chars().count() <= max_len {
+        return name.to_string();
+    }
+    let truncated: String = name.chars().take(max_len.saturating_sub(3)).collect();
+    format!("{}...", truncated)
+}
+
+fn parse_page_response(data: &[u8]) -> String {
+    if let Ok(response) = rmp_serde::from_slice::<(f64, Vec<u8>, Option<Vec<u8>>)>(data) {
+        if let Some(content) = response.2 {
+            return String::from_utf8_lossy(&content).into_owned();
+        }
+    }
+    String::from_utf8_lossy(data).into_owned()
+}
+
 impl TuiApp {
     pub fn new(
         dest_hash: [u8; 16],
         initial_nodes: Vec<NodeInfo>,
         relay_enabled: bool,
+        initial_interfaces: Vec<InterfaceInfo>,
         event_rx: mpsc::Receiver<NetworkEvent>,
         cmd_tx: mpsc::Sender<TuiCommand>,
     ) -> io::Result<Self> {
@@ -128,6 +177,9 @@ impl TuiApp {
         let mut mynode = MyNodeView::new(dest_hash);
         mynode.set_relay_enabled(relay_enabled);
 
+        let mut interfaces = InterfacesView::new();
+        interfaces.set_interfaces(initial_interfaces);
+
         Ok(Self {
             terminal,
             running: true,
@@ -138,6 +190,7 @@ impl TuiApp {
             saved,
             mynode,
             browser: BrowserView::new(),
+            interfaces,
             status_bar: StatusBar::new(),
             input: Input::default(),
             last_edit_popup_area: Rect::default(),
@@ -175,7 +228,8 @@ impl TuiApp {
                 NetworkEvent::Status(msg) => {
                     self.status_bar.set_status(msg);
                 }
-                NetworkEvent::PageReceived { url, content } => {
+                NetworkEvent::PageReceived { url, data } => {
+                    let content = parse_page_response(&data);
                     self.browser.set_page_content(&url, &content);
                     self.status_bar.clear_status();
                 }
@@ -185,16 +239,41 @@ impl TuiApp {
                         .set_status(format!("Failed to load {}: {}", url, reason));
                 }
                 NetworkEvent::DownloadComplete { filename, path } => {
-                    self.status_bar
-                        .set_status(format!("Downloaded {} to {}", filename, path));
+                    self.status_bar.set_status(format!(
+                        "Downloaded {} to {}",
+                        truncate_filename(&filename, 20),
+                        path
+                    ));
                 }
                 NetworkEvent::DownloadFailed { filename, reason } => {
-                    self.status_bar
-                        .set_status(format!("Failed to download {}: {}", filename, reason));
+                    self.status_bar.set_status(format!(
+                        "Failed to download {}: {}",
+                        truncate_filename(&filename, 20),
+                        reason
+                    ));
                 }
                 NetworkEvent::RelayStats(stats) => {
                     self.mynode.set_stats(stats.clone());
                     self.status_bar.set_relay_stats(stats);
+                }
+                NetworkEvent::ResourceProgress {
+                    received_bytes,
+                    total_bytes,
+                } => {
+                    let pct = if total_bytes > 0 {
+                        (received_bytes * 100) / total_bytes
+                    } else {
+                        0
+                    };
+                    self.status_bar.set_status(format!(
+                        "Downloading... {} / {} ({}%)",
+                        rinse::StatsSnapshot::format_bytes(received_bytes as u64),
+                        rinse::StatsSnapshot::format_bytes(total_bytes as u64),
+                        pct
+                    ));
+                }
+                NetworkEvent::InterfaceStatus { name, connected } => {
+                    self.interfaces.update_status(&name, connected);
                 }
             }
         }
@@ -221,8 +300,16 @@ impl TuiApp {
             ])
             .split(area);
 
-            let header_chunks =
-                Layout::horizontal([Constraint::Min(40), Constraint::Length(30)]).split(chunks[0]);
+            let status_width = self.status_bar.required_width().max(30);
+            let title_min = 15;
+            let available = area.width.saturating_sub(title_min);
+            let clamped_status_width = status_width.min(available);
+
+            let header_chunks = Layout::horizontal([
+                Constraint::Min(title_min),
+                Constraint::Length(clamped_status_width),
+            ])
+            .split(chunks[0]);
 
             frame.render_widget(
                 &mut self.tab_bar,
@@ -271,6 +358,7 @@ impl TuiApp {
                 Tab::Saved => frame.render_widget(&mut self.saved, chunks[1]),
                 Tab::Browser => frame.render_widget(&mut self.browser, chunks[1]),
                 Tab::MyNode => frame.render_widget(&mut self.mynode, chunks[1]),
+                Tab::Interfaces => frame.render_widget(&mut self.interfaces, chunks[1]),
             }
 
             if let AppMode::Editing { field_name, masked } = &mode {
@@ -418,6 +506,16 @@ impl TuiApp {
                     Span::styled("[q]", Style::default().fg(Color::Magenta)),
                     Span::raw(" Quit  "),
                 ]),
+                Tab::Interfaces => Line::from(vec![
+                    Span::styled(" [j/k]", Style::default().fg(Color::Magenta)),
+                    Span::raw(" Navigate  "),
+                    Span::styled("[r]", Style::default().fg(Color::Magenta)),
+                    Span::raw(" Reconnect  "),
+                    Span::styled("[Tab]", Style::default().fg(Color::Magenta)),
+                    Span::raw(" Switch Tab  "),
+                    Span::styled("[q]", Style::default().fg(Color::Magenta)),
+                    Span::raw(" Quit  "),
+                ]),
             },
         }
     }
@@ -526,6 +624,7 @@ impl TuiApp {
             KeyCode::Enter => self.handle_enter(),
             KeyCode::Char('a') => self.handle_announce(),
             KeyCode::Char('d') => self.handle_delete(),
+            KeyCode::Char('r') if self.tab == Tab::Interfaces => self.handle_reconnect(),
             _ => {}
         }
     }
@@ -616,8 +715,10 @@ impl TuiApp {
 
     fn confirm_download(&mut self) {
         if let Some(download) = self.pending_download.take() {
-            self.status_bar
-                .set_status(format!("Downloading {}...", download.filename));
+            self.status_bar.set_status(format!(
+                "Downloading {}...",
+                truncate_filename(&download.filename, 20)
+            ));
             let _ = self.cmd_tx.blocking_send(TuiCommand::DownloadFile {
                 node: download.node,
                 path: download.path,
@@ -739,6 +840,14 @@ impl TuiApp {
                                     self.send_announce();
                                 }
                             }
+                            Tab::Interfaces => {
+                                if let Some(name) = self.interfaces.click_reconnect(x, y) {
+                                    self.status_bar
+                                        .set_status(format!("Reconnecting to {}...", name));
+                                    let _ =
+                                        self.cmd_tx.blocking_send(TuiCommand::Reconnect { name });
+                                }
+                            }
                         }
                     }
                 }
@@ -761,6 +870,7 @@ impl TuiApp {
         match self.tab {
             Tab::Discovery => self.discovery.scroll_down(),
             Tab::Saved => self.saved.scroll_down(),
+            Tab::Interfaces => self.interfaces.scroll_down(),
             Tab::Browser | Tab::MyNode => {}
         }
     }
@@ -769,6 +879,7 @@ impl TuiApp {
         match self.tab {
             Tab::Discovery => self.discovery.scroll_up(),
             Tab::Saved => self.saved.scroll_up(),
+            Tab::Interfaces => self.interfaces.scroll_up(),
             Tab::Browser | Tab::MyNode => {}
         }
     }
@@ -785,6 +896,9 @@ impl TuiApp {
             Tab::MyNode => {
                 self.send_announce();
             }
+            Tab::Interfaces => {
+                self.handle_reconnect();
+            }
         }
     }
 
@@ -798,7 +912,8 @@ impl TuiApp {
             }
             ModalAction::Save => {
                 if let Some(node) = self.discovery.selected_node().cloned() {
-                    self.saved.add_node(node);
+                    self.saved.add_node(node.clone());
+                    let _ = self.cmd_tx.blocking_send(TuiCommand::SaveNode { node });
                     self.discovery.close_modal();
                     self.status_bar.set_status("Node saved".into());
                 }
@@ -825,6 +940,9 @@ impl TuiApp {
             }
             SavedModalAction::Delete => {
                 if let Some(removed) = self.saved.remove_selected() {
+                    let _ = self
+                        .cmd_tx
+                        .blocking_send(TuiCommand::RemoveNode { hash: removed.hash });
                     self.saved.close_modal();
                     self.status_bar
                         .set_status(format!("Removed {}", removed.name));
@@ -918,6 +1036,14 @@ impl TuiApp {
     fn handle_delete(&mut self) {
         if self.tab == Tab::Saved {
             self.saved.open_delete_modal();
+        }
+    }
+
+    fn handle_reconnect(&mut self) {
+        if let Some(name) = self.interfaces.try_reconnect_selected() {
+            self.status_bar
+                .set_status(format!("Reconnecting to {}...", name));
+            let _ = self.cmd_tx.blocking_send(TuiCommand::Reconnect { name });
         }
     }
 
