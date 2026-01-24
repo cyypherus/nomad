@@ -114,15 +114,13 @@ fn normalize_path(path: &str) -> String {
 }
 
 fn is_download_path(path: &str) -> bool {
-    let path_lower = path.to_lowercase();
-
-    let ext = path_lower.rsplit('.').next().unwrap_or("");
-
-    if ext.is_empty() {
+    let filename = path.rsplit('/').next().unwrap_or("");
+    if !filename.contains('.') {
         return false;
     }
 
-    !MICRON_EXTENSIONS.contains(&ext)
+    let ext = filename.rsplit('.').next().unwrap_or("").to_lowercase();
+    !MICRON_EXTENSIONS.contains(&ext.as_str())
 }
 
 fn extract_filename(path: &str) -> String {
@@ -137,6 +135,7 @@ mod tests {
         NodeInfo {
             name: name.to_string(),
             hash,
+            identify: false,
         }
     }
 

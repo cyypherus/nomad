@@ -19,10 +19,12 @@ pub enum AppError {
 
 pub struct NomadApp {
     config: Config,
+    identity: Identity,
     node: Arc<Mutex<AsyncNode<AsyncTcpTransport>>>,
     service_id: Option<ServiceId>,
     dest_hash: [u8; 16],
     interface_status: HashMap<String, bool>,
+    announced_on_startup: bool,
 }
 
 impl NomadApp {
@@ -79,17 +81,20 @@ impl NomadApp {
             }
         }
 
-        if !enabled_interfaces.is_empty() {
+        let announced_on_startup = !enabled_interfaces.is_empty();
+        if announced_on_startup {
             node.announce(service_id);
             log::info!("Announced on network");
         }
 
         Ok(Self {
             config,
+            identity,
             node: Arc::new(Mutex::new(node)),
             service_id: Some(service_id),
             dest_hash,
             interface_status,
+            announced_on_startup,
         })
     }
 
@@ -111,5 +116,13 @@ impl NomadApp {
 
     pub fn interface_status(&self) -> &HashMap<String, bool> {
         &self.interface_status
+    }
+
+    pub fn announced_on_startup(&self) -> bool {
+        self.announced_on_startup
+    }
+
+    pub fn take_identity(self) -> Identity {
+        self.identity
     }
 }

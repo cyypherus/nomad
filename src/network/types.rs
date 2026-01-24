@@ -6,21 +6,11 @@ pub struct NodeInfo {
     #[serde(with = "hex_bytes_16")]
     pub hash: Address,
     pub name: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct PeerInfo {
-    pub hash: Address,
-    pub name: Option<String>,
+    #[serde(default)]
+    pub identify: bool,
 }
 
 impl NodeInfo {
-    pub fn hash_hex(&self) -> String {
-        hex::encode(self.hash)
-    }
-}
-
-impl PeerInfo {
     pub fn hash_hex(&self) -> String {
         hex::encode(self.hash)
     }

@@ -89,6 +89,9 @@ pub enum TuiCommand {
     RemoveNode {
         hash: [u8; 16],
     },
+    ToggleNodeIdentify {
+        hash: [u8; 16],
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -152,6 +155,7 @@ impl TuiApp {
         initial_nodes: Vec<NodeInfo>,
         relay_enabled: bool,
         initial_interfaces: Vec<InterfaceInfo>,
+        announced_on_startup: bool,
         event_rx: mpsc::Receiver<NetworkEvent>,
         cmd_tx: mpsc::Sender<TuiCommand>,
     ) -> io::Result<Self> {
@@ -176,6 +180,10 @@ impl TuiApp {
 
         let mut mynode = MyNodeView::new(dest_hash);
         mynode.set_relay_enabled(relay_enabled);
+        if announced_on_startup {
+            mynode.update_announce_time();
+            mynode.increment_announces_sent();
+        }
 
         let mut interfaces = InterfacesView::new();
         interfaces.set_interfaces(initial_interfaces);
@@ -568,20 +576,6 @@ impl TuiApp {
             return;
         }
 
-        if self.saved.is_modal_open() {
-            match code {
-                KeyCode::Esc => self.saved.close_modal(),
-                KeyCode::Tab | KeyCode::Down | KeyCode::Char('j') => self.saved.select_next(),
-                KeyCode::BackTab | KeyCode::Up | KeyCode::Char('k') => self.saved.select_prev(),
-                KeyCode::Enter => {
-                    let action = self.saved.modal_action();
-                    self.handle_saved_modal_action(action);
-                }
-                _ => {}
-            }
-            return;
-        }
-
         if self.tab == Tab::Browser {
             match code {
                 KeyCode::Char('q') => self.running = false,
@@ -603,6 +597,9 @@ impl TuiApp {
                 }
                 KeyCode::Char('r') => {
                     self.reload_page();
+                }
+                KeyCode::F(12) => {
+                    self.debug_save_page();
                 }
                 _ => {}
             }
@@ -795,14 +792,6 @@ impl TuiApp {
                             return;
                         }
 
-                        if self.saved.is_modal_open() {
-                            let modal_action = self.saved.click_modal(x, y, self.last_main_area);
-                            if modal_action != SavedModalAction::None {
-                                self.handle_saved_modal_action(modal_action);
-                            }
-                            return;
-                        }
-
                         match self.tab {
                             Tab::Discovery => {
                                 if self.discovery.click(x, y, self.last_main_area).is_some() {
@@ -810,12 +799,9 @@ impl TuiApp {
                                 }
                             }
                             Tab::Saved => {
-                                if self.saved.click(x, y, self.last_main_area).is_some() {
-                                    self.saved.open_modal();
-                                } else {
-                                    let action = self.saved.click_detail(x, y);
-                                    self.handle_saved_modal_action(action);
-                                }
+                                self.saved.click(x, y, self.last_main_area);
+                                let action = self.saved.click_detail(x, y);
+                                self.handle_saved_modal_action(action);
                             }
                             Tab::Browser => {
                                 use super::browser_view::NavAction;
@@ -890,7 +876,9 @@ impl TuiApp {
                 self.discovery.open_modal();
             }
             Tab::Saved => {
-                self.saved.open_modal();
+                if let Some(node) = self.saved.selected_node().cloned() {
+                    self.connect_to_node(&node);
+                }
             }
             Tab::Browser => {}
             Tab::MyNode => {
@@ -934,7 +922,6 @@ impl TuiApp {
         match action {
             SavedModalAction::Connect => {
                 if let Some(node) = self.saved.selected_node().cloned() {
-                    self.saved.close_modal();
                     self.connect_to_node(&node);
                 }
             }
@@ -943,7 +930,6 @@ impl TuiApp {
                     let _ = self
                         .cmd_tx
                         .blocking_send(TuiCommand::RemoveNode { hash: removed.hash });
-                    self.saved.close_modal();
                     self.status_bar
                         .set_status(format!("Removed {}", removed.name));
                 }
@@ -953,8 +939,21 @@ impl TuiApp {
                     self.copy_to_clipboard(&node.hash_hex());
                 }
             }
-            SavedModalAction::Cancel => {
-                self.saved.close_modal();
+            SavedModalAction::ToggleIdentify => {
+                if let Some(node) = self.saved.toggle_identify_selected() {
+                    let hash = node.hash;
+                    let enabled = node.identify;
+                    let _ = self
+                        .cmd_tx
+                        .blocking_send(TuiCommand::ToggleNodeIdentify { hash });
+                    if enabled {
+                        self.status_bar
+                            .set_status("Self-identify enabled for this node".to_string());
+                    } else {
+                        self.status_bar
+                            .set_status("Self-identify disabled for this node".to_string());
+                    }
+                }
             }
             SavedModalAction::None => {}
         }
@@ -1035,7 +1034,7 @@ impl TuiApp {
 
     fn handle_delete(&mut self) {
         if self.tab == Tab::Saved {
-            self.saved.open_delete_modal();
+            self.handle_saved_modal_action(SavedModalAction::Delete);
         }
     }
 
@@ -1054,6 +1053,44 @@ impl TuiApp {
             }
             Err(e) => {
                 self.status_bar.set_status(format!("Failed to copy: {}", e));
+            }
+        }
+    }
+
+    fn debug_save_page(&mut self) {
+        let Some(content) = self.browser.browser.content.as_ref() else {
+            self.status_bar.set_status("No page content to save".into());
+            return;
+        };
+
+        let filename = if let Some(url) = self.browser.browser.url.as_ref() {
+            let safe_name: String = url
+                .chars()
+                .map(|c: char| {
+                    if c.is_alphanumeric() || c == '.' || c == '-' {
+                        c
+                    } else {
+                        '_'
+                    }
+                })
+                .collect();
+            if safe_name.ends_with(".mu") {
+                safe_name
+            } else {
+                format!("{}.mu", safe_name)
+            }
+        } else {
+            "debug_page.mu".to_string()
+        };
+
+        let path = std::path::Path::new(".nomad").join(&filename);
+        match std::fs::write(&path, content) {
+            Ok(()) => {
+                self.status_bar
+                    .set_status(format!("Saved to {}", path.display()));
+            }
+            Err(e) => {
+                self.status_bar.set_status(format!("Failed to save: {}", e));
             }
         }
     }

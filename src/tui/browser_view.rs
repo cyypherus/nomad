@@ -16,7 +16,7 @@ pub enum NavAction {
 }
 
 pub struct BrowserView {
-    browser: Browser<RatatuiRenderer>,
+    pub browser: Browser<RatatuiRenderer>,
     current_node: Option<NodeInfo>,
     loading_url: Option<String>,
     last_content_area: Rect,
@@ -270,11 +270,20 @@ impl Widget for &mut BrowserView {
                 .render(content_area, buf);
         }
 
-        let link_text = self
-            .browser
-            .selected_link()
-            .map(|url| format!("\u{2192} {}", url))
-            .unwrap_or_default();
+        let link_text = match (
+            self.browser.selected_link(),
+            self.browser.selected_link_fields(),
+        ) {
+            (Some(url), Some(fields)) if !fields.is_empty() => {
+                let field_strs: Vec<_> = fields
+                    .iter()
+                    .map(|(name, value)| format!("{}={}", name, value))
+                    .collect();
+                format!("\u{2192} {} [{}]", url, field_strs.join(", "))
+            }
+            (Some(url), _) => format!("\u{2192} {}", url),
+            _ => String::new(),
+        };
         Paragraph::new(link_text)
             .style(Style::default().fg(Color::DarkGray))
             .render(link_bar_area, buf);

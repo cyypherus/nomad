@@ -40,23 +40,21 @@ impl NodeRegistry {
         self.persist();
     }
 
-    pub fn get(&self, hash: &[u8; 16]) -> Option<&NodeInfo> {
-        self.nodes.get(hash)
-    }
-
     pub fn all(&self) -> Vec<&NodeInfo> {
         self.nodes.values().collect()
     }
 
-    pub fn contains(&self, hash: &[u8; 16]) -> bool {
-        self.nodes.contains_key(hash)
-    }
-
-    pub fn update_name(&mut self, hash: &[u8; 16], name: String) {
-        if let Some(node) = self.nodes.get_mut(hash) {
-            node.name = name;
+    pub fn toggle_identify(&mut self, hash: &[u8; 16]) -> Option<bool> {
+        let new_value = if let Some(node) = self.nodes.get_mut(hash) {
+            node.identify = !node.identify;
+            Some(node.identify)
+        } else {
+            None
+        };
+        if new_value.is_some() {
             self.persist();
         }
+        new_value
     }
 
     pub fn remove(&mut self, hash: &[u8; 16]) -> Option<NodeInfo> {

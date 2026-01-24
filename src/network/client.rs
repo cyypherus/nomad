@@ -57,6 +57,7 @@ impl NetworkClient {
                 let node = NodeInfo {
                     hash: dest.address,
                     name,
+                    identify: false,
                 };
 
                 known.insert(dest.address);
@@ -69,10 +70,6 @@ impl NetworkClient {
                 let _ = self.node_announce_tx.send(node);
             }
         }
-    }
-
-    pub async fn registry(&self) -> tokio::sync::RwLockReadGuard<'_, NodeRegistry> {
-        self.registry.read().await
     }
 
     pub async fn registry_mut(&self) -> tokio::sync::RwLockWriteGuard<'_, NodeRegistry> {

@@ -62,8 +62,4 @@ impl Identity {
     pub fn inner(&self) -> &RinseIdentity {
         &self.inner
     }
-
-    pub fn into_inner(self) -> RinseIdentity {
-        self.inner
-    }
 }

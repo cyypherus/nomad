@@ -22,6 +22,7 @@ struct FetchReq {
     dest: [u8; 16],
     path: String,
     form_data: HashMap<String, String>,
+    identify: bool,
     reply: oneshot::Sender<Result<Vec<u8>, String>>,
 }
 
@@ -79,14 +80,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|(name, cfg)| (name.to_string(), cfg.clone()))
         .collect();
 
-    let (node, service_id, dest_hash, relay_enabled, interface_info) = {
+    let (
+        node,
+        service_id,
+        dest_hash,
+        relay_enabled,
+        interface_info,
+        identity,
+        announced_on_startup,
+    ) = {
         let mut nomad = NomadApp::new().await?;
         let dest_hash = nomad.dest_hash();
         let relay_enabled = nomad.relay_enabled();
         let interface_info = build_interface_info(&config, nomad.interface_status());
+        let announced_on_startup = nomad.announced_on_startup();
         let node = nomad.take_node();
         let service_id = nomad.take_service_id();
-        (node, service_id, dest_hash, relay_enabled, interface_info)
+        let identity = nomad.take_identity();
+        (
+            node,
+            service_id,
+            dest_hash,
+            relay_enabled,
+            interface_info,
+            identity,
+            announced_on_startup,
+        )
     };
 
     let (event_tx, event_rx) = mpsc::channel::<NetworkEvent>(100);
@@ -134,7 +153,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let _ = event_tx_clone.send(NetworkEvent::AnnounceSent).await;
                         }
                         TuiCommand::FetchPage { node: target_node, path, form_data } => {
-                            log::info!("FetchPage command received: {} path={}", target_node.hash_hex(), path);
+                            log::info!("FetchPage command received: {} path={} form_data={:?}", target_node.hash_hex(), path, form_data);
                             let url = format!("{}:{}", target_node.hash_hex(), path);
                             let event_tx = event_tx_clone.clone();
                             let internal_tx = internal_tx.clone();
@@ -149,6 +168,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     dest: target_node.hash,
                                     path: path.clone(),
                                     form_data,
+                                    identify: target_node.identify,
                                     reply: reply_tx,
                                 })).await;
                                 log::info!("InternalCmd::Fetch sent, waiting for reply");
@@ -181,6 +201,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     dest: target_node.hash,
                                     path,
                                     form_data: HashMap::new(),
+                                    identify: target_node.identify,
                                     reply: reply_tx,
                                 })).await;
 
@@ -284,17 +305,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             log::info!("Removing node: {}", hex::encode(hash));
                             network_client_clone.registry_mut().await.remove(&hash);
                         }
+                        TuiCommand::ToggleNodeIdentify { hash } => {
+                            log::info!("Toggling self-identify for node: {}", hex::encode(hash));
+                            network_client_clone.registry_mut().await.toggle_identify(&hash);
+                        }
                     }
                 }
                 Some(cmd) = internal_rx.recv() => {
                     match cmd {
                         InternalCmd::Fetch(req) => {
-                            log::info!("Processing fetch request: dest={} path={}", hex::encode(req.dest), req.path);
+                            log::info!("Processing fetch request: dest={} path={} identify={} form_data={:?}", hex::encode(req.dest), req.path, req.identify, req.form_data);
                             let request_data = build_page_request(&req.form_data);
                             let node = node.clone();
                             let path = req.path.clone();
+                            let identity_for_req = identity.inner().clone();
 
                             tokio::spawn(async move {
+                                if req.identify {
+                                    log::info!("Self-identify enabled, identifying before request");
+                                    if let Some(link) = node.establish_link(service_id, req.dest).await {
+                                        node.self_identify(link, &identity_for_req);
+                                    }
+                                }
+
                                 log::info!("Calling node.request()");
                                 let result = match node.request(service_id, req.dest, &path, &request_data).await {
                                     Ok((response, _metadata)) => {
@@ -330,7 +363,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let event_tx_receive = event_tx.clone();
     let receive_task = tokio::spawn(async move {
         loop {
-            match node_for_receive.receive(service_id).await {
+            match node_for_receive.recv(service_id).await {
                 Some(ServiceEvent::DestinationsChanged) => {
                     let destinations = node_for_receive.known_destinations().await;
                     network_client_for_receive
@@ -389,6 +422,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             initial_nodes,
             relay_enabled,
             interface_info,
+            announced_on_startup,
             event_rx,
             cmd_tx,
         )?;
