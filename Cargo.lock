@@ -1584,6 +1584,7 @@ dependencies = [
  "serde_bytes",
  "sha2",
  "tokio",
+ "toml",
  "x25519-dalek",
 ]
 

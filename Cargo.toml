@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-rinse = { path = "../rinse", features = ["tokio"] }
+rinse = { path = "../rinse", features = ["tokio", "config"] }
 micronaut = { path = "../micronaut", features = ["ratatui"] }
 
 tokio = { version = "1", features = ["full"] }
