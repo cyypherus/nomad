@@ -60,12 +60,6 @@ impl StatusBar {
 
 impl Widget for &StatusBar {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        for x in area.x..area.x + area.width {
-            for y in area.y..area.y + area.height {
-                buf[(x, y)].set_bg(Color::Rgb(20, 20, 30));
-            }
-        }
-
         if let Some(ref msg) = self.status_message {
             let max_chars = area.width.saturating_sub(2) as usize;
             let char_count = msg.chars().count();

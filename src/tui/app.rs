@@ -98,6 +98,7 @@ pub enum TuiCommand {
 enum AppMode {
     Normal,
     Editing { field_name: String, masked: bool },
+    EditingUrl,
     ConfirmDownload { filename: String },
 }
 
@@ -224,9 +225,16 @@ impl TuiApp {
         while let Ok(event) = self.event_rx.try_recv() {
             match event {
                 NetworkEvent::NodeAnnounce(node) => {
-                    self.discovery.add_node(node);
+                    self.discovery.add_node(node.clone());
                     self.mynode.increment_announces_received();
-                    self.status_bar.set_status("Node discovered".into());
+
+                    if let Some(current) = self.browser.current_node() {
+                        if current.hash == node.hash && current.name != node.name {
+                            self.browser.set_current_node(node.clone());
+                        }
+                    }
+
+                    self.saved.update_node_name(node.hash, &node.name);
                 }
                 NetworkEvent::AnnounceSent => {
                     self.mynode.increment_announces_sent();
@@ -406,6 +414,36 @@ impl TuiApp {
                 frame.set_cursor_position((cursor_x, inner_y));
             }
 
+            if mode == AppMode::EditingUrl {
+                let inner_width = 60u16.saturating_sub(4);
+                let scroll = input_cursor.saturating_sub(inner_width as usize);
+                let scrolled_value: String = input_value.chars().skip(scroll).collect();
+
+                let content = vec![
+                    Line::from(Span::styled(
+                        scrolled_value,
+                        Style::default().fg(Color::White),
+                    )),
+                    Line::from(""),
+                ];
+
+                let modal = Modal::new("Go to URL")
+                    .content(content)
+                    .buttons(vec![
+                        ModalButton::new("Cancel", Color::DarkGray),
+                        ModalButton::new("Go", Color::Green),
+                    ])
+                    .border_color(Color::Cyan);
+
+                let popup_area = modal.render_centered(area, frame.buffer_mut(), 60, 6);
+                last_edit_popup_area = popup_area;
+
+                let inner_x = popup_area.x + 1;
+                let inner_y = popup_area.y + 1;
+                let cursor_x = inner_x + (input_cursor - scroll) as u16;
+                frame.set_cursor_position((cursor_x, inner_y));
+            }
+
             if let AppMode::ConfirmDownload { filename } = &mode {
                 let content = vec![
                     Line::from(""),
@@ -452,7 +490,7 @@ impl TuiApp {
                 Span::styled("[Esc/n]", Style::default().fg(Color::Magenta)),
                 Span::raw(" Cancel  "),
             ]),
-            AppMode::Editing { .. } => Line::from(vec![
+            AppMode::Editing { .. } | AppMode::EditingUrl => Line::from(vec![
                 Span::styled(" [Enter]", Style::default().fg(Color::Magenta)),
                 Span::raw(" Confirm  "),
                 Span::styled("[Esc]", Style::default().fg(Color::Magenta)),
@@ -498,9 +536,11 @@ impl TuiApp {
                     Span::styled(" [j/k]", Style::default().fg(Color::Magenta)),
                     Span::raw(" Scroll  "),
                     Span::styled("[Tab]", Style::default().fg(Color::Magenta)),
-                    Span::raw(" Next Link  "),
+                    Span::raw(" Next  "),
                     Span::styled("[Enter]", Style::default().fg(Color::Magenta)),
                     Span::raw(" Activate  "),
+                    Span::styled("[s]", Style::default().fg(Color::Magenta)),
+                    Span::raw(" Save  "),
                     Span::styled("[r]", Style::default().fg(Color::Magenta)),
                     Span::raw(" Reload  "),
                     Span::styled("[q]", Style::default().fg(Color::Magenta)),
@@ -550,6 +590,7 @@ impl TuiApp {
 
                 match &self.mode {
                     AppMode::Editing { .. } => self.handle_editing_key(&evt),
+                    AppMode::EditingUrl => self.handle_url_editing_key(&evt),
                     AppMode::ConfirmDownload { .. } => self.handle_download_key(key.code),
                     AppMode::Normal => self.handle_normal_key(key.code, ctrl),
                 }
@@ -622,6 +663,7 @@ impl TuiApp {
             KeyCode::Char('a') => self.handle_announce(),
             KeyCode::Char('d') => self.handle_delete(),
             KeyCode::Char('r') if self.tab == Tab::Interfaces => self.handle_reconnect(),
+            KeyCode::Char('s') if self.tab == Tab::Browser => self.save_current_browser_node(),
             _ => {}
         }
     }
@@ -657,6 +699,41 @@ impl TuiApp {
         self.mode = AppMode::Normal;
     }
 
+    fn handle_url_editing_key(&mut self, evt: &Event) {
+        if let Event::Key(key) = evt {
+            match key.code {
+                KeyCode::Enter => self.confirm_url_edit(),
+                KeyCode::Esc => self.cancel_url_edit(),
+                _ => {
+                    self.input.handle_event(evt);
+                }
+            }
+        }
+    }
+
+    fn confirm_url_edit(&mut self) {
+        let url = self.input.value().to_string();
+        self.input.reset();
+        self.mode = AppMode::Normal;
+        if !url.is_empty() {
+            self.navigate_to_url(&url);
+        }
+    }
+
+    fn cancel_url_edit(&mut self) {
+        self.input.reset();
+        self.mode = AppMode::Normal;
+    }
+
+    fn navigate_to_url(&mut self, url: &str) {
+        let link = micronaut::Link {
+            url: url.to_string(),
+            fields: vec![],
+            form_data: std::collections::HashMap::new(),
+        };
+        self.navigate_to_link(link);
+    }
+
     fn handle_edit_modal_click(&mut self, x: u16, y: u16) {
         let modal = Modal::new("")
             .buttons(vec![
@@ -669,6 +746,21 @@ impl TuiApp {
             match idx {
                 0 => self.cancel_edit(),
                 1 => self.confirm_edit(),
+                _ => {}
+            }
+        }
+    }
+
+    fn handle_url_modal_click(&mut self, x: u16, y: u16) {
+        let modal = Modal::new("").buttons(vec![
+            ModalButton::new("Cancel", Color::DarkGray),
+            ModalButton::new("Go", Color::Green),
+        ]);
+
+        if let Some(idx) = modal.hit_test_buttons(x, y, self.last_edit_popup_area) {
+            match idx {
+                0 => self.cancel_url_edit(),
+                1 => self.confirm_url_edit(),
                 _ => {}
             }
         }
@@ -763,6 +855,67 @@ impl TuiApp {
         }
     }
 
+    fn save_current_browser_node(&mut self) {
+        if let Some(node) = self.browser.current_node().cloned() {
+            let already_saved = self.saved.nodes().iter().any(|n| n.hash == node.hash);
+            if !already_saved {
+                self.saved.add_node(node.clone());
+                let _ = self
+                    .cmd_tx
+                    .blocking_send(TuiCommand::SaveNode { node: node.clone() });
+                self.status_bar.set_status(format!("Saved {}", node.name));
+            } else {
+                self.status_bar
+                    .set_status(format!("{} already saved", node.name));
+            }
+            self.saved.select_by_hash(node.hash);
+        } else {
+            self.status_bar.set_status("No node to save".into());
+        }
+    }
+
+    fn toggle_browser_node_identify(&mut self) {
+        if let Some(node) = self.browser.current_node().cloned() {
+            let hash = node.hash;
+            let currently_enabled = self
+                .saved
+                .nodes()
+                .iter()
+                .find(|n| n.hash == hash)
+                .map(|n| n.identify)
+                .unwrap_or(false);
+
+            if !self.saved.nodes().iter().any(|n| n.hash == hash) {
+                self.saved.add_node(node.clone());
+                let _ = self
+                    .cmd_tx
+                    .blocking_send(TuiCommand::SaveNode { node: node.clone() });
+            }
+
+            for n in self.saved.nodes().iter() {
+                if n.hash == hash {
+                    let _ = self
+                        .cmd_tx
+                        .blocking_send(TuiCommand::ToggleNodeIdentify { hash });
+                    break;
+                }
+            }
+
+            // Update local state
+            let new_state = !currently_enabled;
+            self.saved.set_identify(hash, new_state);
+            self.browser.set_identify_enabled(new_state);
+
+            if new_state {
+                self.status_bar.set_status("Self-identify enabled".into());
+            } else {
+                self.status_bar.set_status("Self-identify disabled".into());
+            }
+        } else {
+            self.status_bar.set_status("No node selected".into());
+        }
+    }
+
     fn handle_mouse(&mut self, kind: MouseEventKind, x: u16, y: u16) {
         match kind {
             MouseEventKind::Down(MouseButton::Left) => {
@@ -778,6 +931,9 @@ impl TuiApp {
                 match &self.mode {
                     AppMode::Editing { .. } => {
                         self.handle_edit_modal_click(x, y);
+                    }
+                    AppMode::EditingUrl => {
+                        self.handle_url_modal_click(x, y);
                     }
                     AppMode::ConfirmDownload { .. } => {
                         self.handle_download_modal_click(x, y);
@@ -816,7 +972,18 @@ impl TuiApp {
                                         NavAction::Reload => {
                                             self.reload_page();
                                         }
+                                        NavAction::ToggleIdentify => {
+                                            self.toggle_browser_node_identify();
+                                        }
+                                        NavAction::Save => {
+                                            self.save_current_browser_node();
+                                        }
                                     }
+                                } else if self.browser.click_url_bar(x, y) {
+                                    let current =
+                                        self.browser.current_url().unwrap_or("").to_string();
+                                    self.input = Input::new(current);
+                                    self.mode = AppMode::EditingUrl;
                                 } else if let Some(interaction) = self.browser.click(x, y) {
                                     self.handle_interaction(interaction);
                                 }
@@ -841,12 +1008,14 @@ impl TuiApp {
             MouseEventKind::ScrollUp => match &self.mode {
                 AppMode::Normal if self.tab == Tab::Browser => self.browser.scroll_up(),
                 AppMode::Normal => self.handle_up(),
-                AppMode::Editing { .. } | AppMode::ConfirmDownload { .. } => {}
+                AppMode::Editing { .. } | AppMode::EditingUrl | AppMode::ConfirmDownload { .. } => {
+                }
             },
             MouseEventKind::ScrollDown => match &self.mode {
                 AppMode::Normal if self.tab == Tab::Browser => self.browser.scroll_down(),
                 AppMode::Normal => self.handle_down(),
-                AppMode::Editing { .. } | AppMode::ConfirmDownload { .. } => {}
+                AppMode::Editing { .. } | AppMode::EditingUrl | AppMode::ConfirmDownload { .. } => {
+                }
             },
             _ => {}
         }
@@ -962,6 +1131,16 @@ impl TuiApp {
     fn connect_to_node(&mut self, node: &NodeInfo) {
         let path = "/page/index.mu".to_string();
         self.browser.set_current_node(node.clone());
+
+        let identify_enabled = self
+            .saved
+            .nodes()
+            .iter()
+            .find(|n| n.hash == node.hash)
+            .map(|n| n.identify)
+            .unwrap_or(false);
+        self.browser.set_identify_enabled(identify_enabled);
+
         self.browser.set_loading(path.clone());
         self.tab = Tab::Browser;
         self.tab_bar = TabBar::new(Tab::Browser);
@@ -989,6 +1168,16 @@ impl TuiApp {
         match self.browser.resolve_link(&link, &all_nodes) {
             LinkAction::Navigate { node, path } => {
                 self.browser.set_current_node(node.clone());
+
+                let identify_enabled = self
+                    .saved
+                    .nodes()
+                    .iter()
+                    .find(|n| n.hash == node.hash)
+                    .map(|n| n.identify)
+                    .unwrap_or(false);
+                self.browser.set_identify_enabled(identify_enabled);
+
                 self.browser.set_loading(path.clone());
                 let _ = self.cmd_tx.blocking_send(TuiCommand::FetchPage {
                     node,
@@ -1083,7 +1272,7 @@ impl TuiApp {
             "debug_page.mu".to_string()
         };
 
-        let path = std::path::Path::new(".nomad").join(&filename);
+        let path = std::path::Path::new(".rinse").join(&filename);
         match std::fs::write(&path, content) {
             Ok(()) => {
                 self.status_bar

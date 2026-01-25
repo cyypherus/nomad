@@ -71,31 +71,37 @@ fn resolve_node_link(
 ) -> Option<(NodeInfo, String)> {
     if let Some(rest) = link_url.strip_prefix(':') {
         let node = current_node?.clone();
-        let path = normalize_path(rest);
+        let path = if rest.is_empty() {
+            "/page/index.mu".to_string()
+        } else {
+            normalize_path(rest)
+        };
         return Some((node, path));
     }
 
-    if link_url.contains(':') {
-        let parts: Vec<&str> = link_url.splitn(2, ':').collect();
-        if parts.len() == 2 && parts[0].len() == 32 {
-            let hash_hex = parts[0];
-            let path = parts[1].to_string();
+    if let Some((hash_hex, path_part)) = parse_hash_link(link_url) {
+        if let Ok(hash_bytes) = hex::decode(hash_hex) {
+            if hash_bytes.len() == 16 {
+                let mut hash = [0u8; 16];
+                hash.copy_from_slice(&hash_bytes);
 
-            if let Ok(hash_bytes) = hex::decode(hash_hex) {
-                if hash_bytes.len() == 16 {
-                    let mut hash = [0u8; 16];
-                    hash.copy_from_slice(&hash_bytes);
+                let node = known_nodes
+                    .iter()
+                    .find(|n| n.hash == hash)
+                    .cloned()
+                    .or_else(|| current_node.filter(|n| n.hash == hash).cloned())
+                    .unwrap_or_else(|| NodeInfo {
+                        name: format!("<{}>", &hash_hex[..8]),
+                        hash,
+                        identify: false,
+                    });
 
-                    let node = known_nodes
-                        .iter()
-                        .find(|n| n.hash == hash)
-                        .cloned()
-                        .or_else(|| current_node.filter(|n| n.hash == hash).cloned());
-
-                    if let Some(node) = node {
-                        return Some((node, normalize_path(&path)));
-                    }
-                }
+                let path = if path_part.is_empty() {
+                    "/page/index.mu".to_string()
+                } else {
+                    normalize_path(path_part)
+                };
+                return Some((node, path));
             }
         }
     }
@@ -103,6 +109,19 @@ fn resolve_node_link(
     let node = current_node?.clone();
     let path = normalize_path(link_url);
     Some((node, path))
+}
+
+fn parse_hash_link(url: &str) -> Option<(&str, &str)> {
+    if url.len() == 32 && url.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Some((url, ""));
+    }
+    if url.contains(':') {
+        let parts: Vec<&str> = url.splitn(2, ':').collect();
+        if parts.len() == 2 && parts[0].len() == 32 {
+            return Some((parts[0], parts[1]));
+        }
+    }
+    None
 }
 
 fn normalize_path(path: &str) -> String {
@@ -172,5 +191,28 @@ mod tests {
         let node = make_node("test", [1; 16]);
         let action = resolve_link(":/other", Some(&node), &[]);
         assert!(matches!(action, LinkAction::Navigate { path, .. } if path == "/other"));
+    }
+
+    #[test]
+    fn test_hash_colon_goes_to_index() {
+        let hash = [
+            0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab,
+            0xcd, 0xef,
+        ];
+        let node = make_node("remote", hash);
+        let action = resolve_link("0123456789abcdef0123456789abcdef:", None, &[node]);
+        assert!(matches!(action, LinkAction::Navigate { path, .. } if path == "/page/index.mu"));
+    }
+
+    #[test]
+    fn test_unknown_hash_creates_node() {
+        let action = resolve_link("abcdef0123456789abcdef0123456789:/page/test", None, &[]);
+        match action {
+            LinkAction::Navigate { node, path } => {
+                assert_eq!(path, "/page/test");
+                assert_eq!(hex::encode(node.hash), "abcdef0123456789abcdef0123456789");
+            }
+            _ => panic!("Expected Navigate"),
+        }
     }
 }

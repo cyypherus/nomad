@@ -423,8 +423,8 @@ fn parse_resource_content(data: &[u8]) -> Result<String, String> {
     let content =
         String::from_utf8(response.1.to_vec()).map_err(|e| format!("Invalid UTF-8: {}", e))?;
 
-    if let Err(e) = std::fs::write(".nomad/last_page.mu", &content) {
-        log::warn!("Failed to save page to .nomad/last_page.mu: {}", e);
+    if let Err(e) = std::fs::write(".rinse/last_page.mu", &content) {
+        log::warn!("Failed to save page to .rinse/last_page.mu: {}", e);
     }
 
     Ok(content)

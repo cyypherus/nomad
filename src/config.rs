@@ -17,8 +17,6 @@ pub struct Config {
     #[serde(default)]
     pub network: NetworkConfig,
     #[serde(default)]
-    pub node: NodeConfig,
-    #[serde(default)]
     pub interfaces: HashMap<String, InterfaceConfig>,
 }
 
@@ -63,27 +61,6 @@ impl InterfaceConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NodeConfig {
-    #[serde(default)]
-    pub enabled: bool,
-    #[serde(default = "default_pages_path")]
-    pub pages_path: String,
-}
-
-fn default_pages_path() -> String {
-    "pages".to_string()
-}
-
-impl Default for NodeConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            pages_path: default_pages_path(),
-        }
-    }
-}
-
 impl Config {
     pub fn load() -> Result<Self, ConfigError> {
         let config_path = Self::config_path()?;
@@ -110,7 +87,6 @@ impl Config {
         );
         Self {
             network: NetworkConfig::default(),
-            node: NodeConfig::default(),
             interfaces,
         }
     }
@@ -136,7 +112,7 @@ impl Config {
     }
 
     pub fn data_dir() -> Result<PathBuf, ConfigError> {
-        Ok(PathBuf::from(".nomad"))
+        Ok(PathBuf::from(".rinse"))
     }
 
     fn config_path() -> Result<PathBuf, ConfigError> {

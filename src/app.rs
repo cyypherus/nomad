@@ -37,7 +37,7 @@ impl NomadApp {
         let relay_enabled = config.network.relay;
         let mut node = AsyncNode::new(relay_enabled);
 
-        let service_id = node.add_service("nomadnetwork", &["/page/*"], identity.inner());
+        let service_id = node.add_service("nomadnetwork.node", &["/page/*"], identity.inner());
         let dest_hash = node.service_address(service_id).unwrap();
 
         log::info!("Our address: {}", hex::encode(dest_hash));

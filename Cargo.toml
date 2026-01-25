@@ -24,6 +24,7 @@ serde_bytes = "0.11"
 sha2 = "0.10"
 rand = "0.8"
 cli-clipboard = "0.4"
+unicode-width = "0.2"
 
 [dev-dependencies]
 ed25519-dalek = { version = "2", features = ["rand_core"] }

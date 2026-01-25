@@ -6,6 +6,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Widget},
 };
+use unicode_width::UnicodeWidthStr;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SavedModalAction {
@@ -56,6 +57,13 @@ impl SavedView {
                 .binary_search_by(|n| n.name.to_lowercase().cmp(&node.name.to_lowercase()))
                 .unwrap_or_else(|p| p);
             self.nodes.insert(pos, node);
+        }
+    }
+
+    pub fn select_by_hash(&mut self, hash: [u8; 16]) {
+        if let Some(pos) = self.nodes.iter().position(|n| n.hash == hash) {
+            self.selected = pos;
+            self.adjust_scroll();
         }
     }
 
@@ -155,6 +163,20 @@ impl SavedView {
         }
     }
 
+    pub fn set_identify(&mut self, hash: [u8; 16], enabled: bool) {
+        if let Some(node) = self.nodes.iter_mut().find(|n| n.hash == hash) {
+            node.identify = enabled;
+        }
+    }
+
+    pub fn update_node_name(&mut self, hash: [u8; 16], name: &str) {
+        if let Some(node) = self.nodes.iter_mut().find(|n| n.hash == hash) {
+            if node.name != name {
+                node.name = name.to_string();
+            }
+        }
+    }
+
     fn render_list(&mut self, area: Rect, buf: &mut Buffer) {
         self.last_list_area = area;
 
@@ -238,29 +260,37 @@ impl SavedView {
 
             let available = inner.width.saturating_sub(3) as usize;
             let hash_display = format!("  {}", hash_short);
-            let hash_len = hash_display.len();
-            let name_chars: Vec<char> = node.name.chars().collect();
-            let name_len = name_chars.len();
+            let hash_len = hash_display.width();
+            let name_width = node.name.width();
 
             if available <= 5 {
                 continue;
             }
 
-            let max_name_len = available.saturating_sub(hash_len);
-            let (name_display, name_display_len) = if name_len <= max_name_len {
-                (node.name.clone(), name_len)
-            } else if max_name_len >= 3 {
-                let truncated: String = name_chars.iter().take(max_name_len - 2).collect();
-                let len = max_name_len;
-                (format!("{}..", truncated), len)
+            let max_name_width = available.saturating_sub(hash_len);
+            let (name_display, name_display_width) = if name_width <= max_name_width {
+                (node.name.clone(), name_width)
+            } else if max_name_width >= 3 {
+                let mut truncated = String::new();
+                let mut width = 0;
+                for c in node.name.chars() {
+                    let cw = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+                    if width + cw + 2 > max_name_width {
+                        break;
+                    }
+                    truncated.push(c);
+                    width += cw;
+                }
+                truncated.push_str("..");
+                (truncated, width + 2)
             } else {
                 (String::new(), 0)
             };
 
             buf.set_string(inner.x + 3, y, &name_display, name_style);
 
-            let hash_x = inner.x + 3 + name_display_len as u16;
-            let remaining = available.saturating_sub(name_display_len);
+            let hash_x = inner.x + 3 + name_display_width as u16;
+            let remaining = available.saturating_sub(name_display_width);
             if remaining >= hash_len {
                 buf.set_string(hash_x, y, &hash_display, hash_style);
             }

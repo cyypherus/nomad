@@ -13,16 +13,22 @@ pub enum NavAction {
     Back,
     Forward,
     Reload,
+    ToggleIdentify,
+    Save,
 }
 
 pub struct BrowserView {
     pub browser: Browser<RatatuiRenderer>,
     current_node: Option<NodeInfo>,
     loading_url: Option<String>,
+    identify_enabled: bool,
     last_content_area: Rect,
     last_back_btn_area: Rect,
     last_fwd_btn_area: Rect,
     last_reload_btn_area: Rect,
+    last_url_area: Rect,
+    last_identify_btn_area: Rect,
+    last_save_btn_area: Rect,
 }
 
 impl Default for BrowserView {
@@ -37,10 +43,14 @@ impl BrowserView {
             browser: Browser::new(RatatuiRenderer),
             current_node: None,
             loading_url: None,
+            identify_enabled: false,
             last_content_area: Rect::default(),
             last_back_btn_area: Rect::default(),
             last_fwd_btn_area: Rect::default(),
             last_reload_btn_area: Rect::default(),
+            last_url_area: Rect::default(),
+            last_identify_btn_area: Rect::default(),
+            last_save_btn_area: Rect::default(),
         }
     }
 
@@ -50,6 +60,14 @@ impl BrowserView {
 
     pub fn set_current_node(&mut self, node: NodeInfo) {
         self.current_node = Some(node);
+    }
+
+    pub fn set_identify_enabled(&mut self, enabled: bool) {
+        self.identify_enabled = enabled;
+    }
+
+    pub fn identify_enabled(&self) -> bool {
+        self.identify_enabled
     }
 
     pub fn set_page_content(&mut self, url: &str, content: &str) {
@@ -104,19 +122,33 @@ impl BrowserView {
     }
 
     pub fn click_nav(&mut self, x: u16, y: u16) -> Option<NavAction> {
-        if self.last_back_btn_area.intersects(Rect::new(x, y, 1, 1)) && self.browser.can_go_back() {
+        let point = Rect::new(x, y, 1, 1);
+        if self.last_back_btn_area.intersects(point) && self.browser.can_go_back() {
             return Some(NavAction::Back);
         }
-        if self.last_fwd_btn_area.intersects(Rect::new(x, y, 1, 1)) && self.browser.can_go_forward()
-        {
+        if self.last_fwd_btn_area.intersects(point) && self.browser.can_go_forward() {
             return Some(NavAction::Forward);
         }
-        if self.last_reload_btn_area.intersects(Rect::new(x, y, 1, 1))
-            && self.browser.url().is_some()
-        {
+        if self.last_reload_btn_area.intersects(point) && self.browser.url().is_some() {
             return Some(NavAction::Reload);
         }
+        if self.last_identify_btn_area.intersects(point) && self.current_node.is_some() {
+            return Some(NavAction::ToggleIdentify);
+        }
+        if self.last_save_btn_area.intersects(point) && self.current_node.is_some() {
+            return Some(NavAction::Save);
+        }
         None
+    }
+
+    pub fn click_url_bar(&self, x: u16, y: u16) -> bool {
+        let point = Rect::new(x, y, 1, 1);
+        self.last_url_area.intersects(point)
+            && !self.last_back_btn_area.intersects(point)
+            && !self.last_fwd_btn_area.intersects(point)
+            && !self.last_reload_btn_area.intersects(point)
+            && !self.last_identify_btn_area.intersects(point)
+            && !self.last_save_btn_area.intersects(point)
     }
 
     pub fn current_url(&self) -> Option<&str> {
@@ -234,9 +266,45 @@ impl Widget for &mut BrowserView {
         self.last_back_btn_area = Rect::new(inner.x, inner.y, 3, 1);
         self.last_fwd_btn_area = Rect::new(inner.x + 4, inner.y, 3, 1);
         self.last_reload_btn_area = Rect::new(inner.x + 8, inner.y, 3, 1);
+        self.last_url_area = Rect::new(inner.x, inner.y, inner.width, 1);
 
-        let url_area = Rect::new(inner.x, inner.y, inner.width, 1);
-        Paragraph::new(nav_bar).render(url_area, buf);
+        Paragraph::new(nav_bar).render(self.last_url_area, buf);
+
+        if self.current_node.is_some() {
+            let save_text = " Save ";
+            let save_width = save_text.len() as u16;
+
+            let id_text = if self.identify_enabled {
+                " [ID] "
+            } else {
+                " ID "
+            };
+            let id_width = id_text.len() as u16;
+
+            let id_x = inner.x + inner.width - id_width;
+            let save_x = id_x - save_width - 1;
+
+            let save_style = Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD);
+            buf.set_string(save_x, inner.y, save_text, save_style);
+            self.last_save_btn_area = Rect::new(save_x, inner.y, save_width, 1);
+
+            let id_style = if self.identify_enabled {
+                Style::default()
+                    .fg(Color::White)
+                    .bg(Color::Red)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Black).bg(Color::DarkGray)
+            };
+            buf.set_string(id_x, inner.y, id_text, id_style);
+            self.last_identify_btn_area = Rect::new(id_x, inner.y, id_width, 1);
+        } else {
+            self.last_save_btn_area = Rect::default();
+            self.last_identify_btn_area = Rect::default();
+        }
 
         let divider_area = Rect::new(inner.x, inner.y + 1, inner.width, 1);
         let divider = "\u{2500}".repeat(inner.width as usize);

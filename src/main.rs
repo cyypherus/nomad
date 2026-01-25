@@ -67,8 +67,8 @@ fn build_interface_info(config: &Config, status: &HashMap<String, bool>) -> Vec<
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    std::fs::create_dir_all(".nomad")?;
-    let log_file = File::create(".nomad/nomad.log")?;
+    std::fs::create_dir_all(".rinse")?;
+    let log_file = File::create(".rinse/nomad.log")?;
     WriteLogger::init(LevelFilter::Trace, LogConfig::default(), log_file)?;
 
     log::info!("Starting Nomad...");
@@ -113,7 +113,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
     let (internal_tx, mut internal_rx) = mpsc::channel::<InternalCmd>(32);
 
-    let registry = NodeRegistry::new(".nomad/nodes.toml");
+    let registry = NodeRegistry::new(".rinse/nodes.toml");
     let initial_nodes: Vec<_> = registry.all().into_iter().cloned().collect();
     let network_client = Arc::new(NetworkClient::new(registry));
 
@@ -207,7 +207,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                                 match reply_rx.await {
                                     Ok(Ok(data)) => {
-                                        let download_dir = std::path::Path::new(".nomad/downloads");
+                                        let download_dir = std::path::Path::new(".rinse/downloads");
                                         if let Err(e) = std::fs::create_dir_all(download_dir) {
                                             let _ = event_tx.send(NetworkEvent::DownloadFailed {
                                                 filename,
@@ -321,15 +321,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let identity_for_req = identity.inner().clone();
 
                             tokio::spawn(async move {
+                                if !node.request_path(req.dest).await {
+                                    log::error!("Path request failed");
+                                    let _ = req.reply.send(Err("Path not found".to_string()));
+                                    return;
+                                }
+
+                                let Some(link) = node.establish_link(service_id, req.dest).await else {
+                                    log::error!("Failed to establish link");
+                                    let _ = req.reply.send(Err("Failed to establish link".to_string()));
+                                    return;
+                                };
+
                                 if req.identify {
                                     log::info!("Self-identify enabled, identifying before request");
-                                    if let Some(link) = node.establish_link(service_id, req.dest).await {
-                                        node.self_identify(link, &identity_for_req);
-                                    }
+                                    node.self_identify(link, &identity_for_req);
                                 }
 
                                 log::info!("Calling node.request()");
-                                let result = match node.request(service_id, req.dest, &path, &request_data).await {
+                                let result = match node.request(service_id, link, &path, &request_data).await {
                                     Ok((response, _metadata)) => {
                                         log::info!("Got response: {} bytes", response.len());
                                         Ok(response)
