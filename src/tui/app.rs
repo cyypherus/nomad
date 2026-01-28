@@ -8,21 +8,21 @@ use crossterm::{
     },
     execute,
     terminal::{
-        Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode,
-        enable_raw_mode,
+        disable_raw_mode, enable_raw_mode, Clear, ClearType, EnterAlternateScreen,
+        LeaveAlternateScreen,
     },
 };
 use ratatui::{
-    Terminal,
     layout::{Constraint, Layout, Rect},
     prelude::{CrosstermBackend, Widget},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::Paragraph,
+    Terminal,
 };
 use tokio::sync::mpsc;
-use tui_input::Input;
 use tui_input::backend::crossterm::EventHandler;
+use tui_input::Input;
 
 use super::browser_view::BrowserView;
 use super::discovery::{DiscoveryView, ModalAction};
@@ -46,6 +46,14 @@ pub enum NetworkEvent {
     },
     PageFailed {
         url: String,
+        reason: String,
+    },
+    PartialReceived {
+        partial: micronaut::PartialInfo,
+        data: Vec<u8>,
+    },
+    PartialFailed {
+        partial: micronaut::PartialInfo,
         reason: String,
     },
     DownloadComplete {
@@ -73,6 +81,11 @@ pub enum TuiCommand {
     FetchPage {
         node: NodeInfo,
         path: String,
+        form_data: std::collections::HashMap<String, String>,
+    },
+    FetchPartial {
+        node: NodeInfo,
+        partial: micronaut::PartialInfo,
         form_data: std::collections::HashMap<String, String>,
     },
     DownloadFile {
@@ -131,6 +144,7 @@ pub struct TuiApp {
     cmd_tx: mpsc::Sender<TuiCommand>,
 
     last_main_area: Rect,
+    last_partial_check: std::time::Instant,
 }
 
 fn truncate_filename(name: &str, max_len: usize) -> String {
@@ -148,6 +162,13 @@ fn parse_page_response(data: &[u8]) -> String {
         }
     }
     String::from_utf8_lossy(data).into_owned()
+}
+
+fn current_time_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 impl TuiApp {
@@ -208,17 +229,28 @@ impl TuiApp {
             event_rx,
             cmd_tx,
             last_main_area: Rect::default(),
+            last_partial_check: std::time::Instant::now(),
         })
     }
 
     pub fn run(&mut self) -> io::Result<()> {
         while self.running {
             self.poll_events();
+            self.poll_partials();
             self.status_bar.tick();
             self.draw()?;
             self.handle_input()?;
         }
         Ok(())
+    }
+
+    fn poll_partials(&mut self) {
+        if self.last_partial_check.elapsed() >= Duration::from_secs(1) {
+            self.last_partial_check = std::time::Instant::now();
+            if self.browser.browser.has_partials() {
+                self.check_partials();
+            }
+        }
     }
 
     fn poll_events(&mut self) {
@@ -291,6 +323,21 @@ impl TuiApp {
                 NetworkEvent::InterfaceStatus { name, connected } => {
                     self.interfaces.update_status(&name, connected);
                 }
+                NetworkEvent::PartialReceived { partial, data } => {
+                    let content = parse_page_response(&data);
+                    self.browser.browser.set_partial_content(
+                        &partial,
+                        content,
+                        current_time_secs(),
+                    );
+                }
+                NetworkEvent::PartialFailed { partial, reason } => {
+                    self.browser.browser.set_partial_content(
+                        &partial,
+                        format!("`Ff00Error: {}", reason),
+                        current_time_secs(),
+                    );
+                }
             }
         }
     }
@@ -345,7 +392,7 @@ impl TuiApp {
                         .fg(Color::White)
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(" v0.1", Style::default().fg(Color::DarkGray)),
+                Span::styled(" net client", Style::default().fg(Color::DarkGray)),
             ]);
             Paragraph::new(title).render(
                 Rect::new(
@@ -834,6 +881,47 @@ impl TuiApp {
                     masked: field.masked,
                 };
             }
+            micronaut::Interaction::RefreshPartials(partial_ids) => {
+                self.refresh_partials_by_id(&partial_ids);
+            }
+        }
+    }
+
+    fn refresh_partials_by_id(&mut self, partial_ids: &[String]) {
+        let Some(node) = self.browser.current_node().cloned() else {
+            return;
+        };
+
+        let now_secs = current_time_secs();
+        let all_partials = self.browser.browser.partials_needing_update(now_secs);
+
+        for partial in all_partials {
+            if partial_ids.iter().any(|id| partial.url.contains(id)) {
+                let form_data = self.browser.browser.partial_form_data(&partial);
+                let _ = self.cmd_tx.blocking_send(TuiCommand::FetchPartial {
+                    node: node.clone(),
+                    partial,
+                    form_data,
+                });
+            }
+        }
+    }
+
+    fn check_partials(&mut self) {
+        let Some(node) = self.browser.current_node().cloned() else {
+            return;
+        };
+
+        let now_secs = current_time_secs();
+        let partials = self.browser.browser.partials_needing_update(now_secs);
+
+        for partial in partials {
+            let form_data = self.browser.browser.partial_form_data(&partial);
+            let _ = self.cmd_tx.blocking_send(TuiCommand::FetchPartial {
+                node: node.clone(),
+                partial,
+                form_data,
+            });
         }
     }
 

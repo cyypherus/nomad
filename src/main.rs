@@ -187,6 +187,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             });
                         }
+                        TuiCommand::FetchPartial { node: target_node, partial, form_data } => {
+                            log::info!("FetchPartial command received: {} url={}", target_node.hash_hex(), partial.url);
+                            let event_tx = event_tx_clone.clone();
+                            let internal_tx = internal_tx.clone();
+
+                            tokio::spawn(async move {
+                                let (reply_tx, reply_rx) = oneshot::channel();
+                                let _ = internal_tx.send(InternalCmd::Fetch(FetchReq {
+                                    dest: target_node.hash,
+                                    path: partial.url.clone(),
+                                    form_data,
+                                    identify: target_node.identify,
+                                    reply: reply_tx,
+                                })).await;
+
+                                match reply_rx.await {
+                                    Ok(Ok(data)) => {
+                                        let _ = event_tx.send(NetworkEvent::PartialReceived { partial, data }).await;
+                                    }
+                                    Ok(Err(e)) => {
+                                        let _ = event_tx.send(NetworkEvent::PartialFailed { partial, reason: e }).await;
+                                    }
+                                    Err(_) => {
+                                        let _ = event_tx.send(NetworkEvent::PartialFailed { partial, reason: "Request cancelled".into() }).await;
+                                    }
+                                }
+                            });
+                        }
                         TuiCommand::DownloadFile { node: target_node, path, filename } => {
                             log::info!("Download requested: {} from {} path={}", filename, target_node.name, path);
                             let event_tx = event_tx_clone.clone();

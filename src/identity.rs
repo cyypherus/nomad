@@ -1,5 +1,5 @@
+use rinse::config::{load_or_generate_identity, ConfigError};
 use rinse::Identity as RinseIdentity;
-use rinse::config::{ConfigError, load_or_generate_identity};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
