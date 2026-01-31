@@ -4,9 +4,8 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Widget},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Widget},
 };
-use unicode_width::UnicodeWidthStr;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SavedModalAction {
@@ -19,8 +18,7 @@ pub enum SavedModalAction {
 
 pub struct SavedView {
     nodes: Vec<NodeInfo>,
-    selected: usize,
-    scroll_offset: usize,
+    list_state: ListState,
     last_height: usize,
     last_list_area: Rect,
     identify_button_area: Option<Rect>,
@@ -39,8 +37,7 @@ impl SavedView {
     pub fn new() -> Self {
         Self {
             nodes: Vec::new(),
-            selected: 0,
-            scroll_offset: 0,
+            list_state: ListState::default(),
             last_height: 10,
             last_list_area: Rect::default(),
             identify_button_area: None,
@@ -48,6 +45,10 @@ impl SavedView {
             copy_button_area: None,
             delete_button_area: None,
         }
+    }
+
+    fn selected(&self) -> usize {
+        self.list_state.selected().unwrap_or(0)
     }
 
     pub fn add_node(&mut self, node: NodeInfo) {
@@ -62,8 +63,7 @@ impl SavedView {
 
     pub fn select_by_hash(&mut self, hash: [u8; 16]) {
         if let Some(pos) = self.nodes.iter().position(|n| n.hash == hash) {
-            self.selected = pos;
-            self.adjust_scroll();
+            self.list_state.select(Some(pos));
         }
     }
 
@@ -76,48 +76,37 @@ impl SavedView {
     }
 
     pub fn selected_node(&self) -> Option<&NodeInfo> {
-        self.nodes.get(self.selected)
+        self.nodes.get(self.selected())
     }
 
     pub fn select_next(&mut self) {
-        if !self.nodes.is_empty() {
-            self.selected = (self.selected + 1) % self.nodes.len();
-            self.adjust_scroll();
+        if self.nodes.is_empty() {
+            return;
         }
+        let i = match self.list_state.selected() {
+            Some(i) => (i + 1) % self.nodes.len(),
+            None => 0,
+        };
+        self.list_state.select(Some(i));
     }
 
     pub fn select_prev(&mut self) {
-        if !self.nodes.is_empty() {
-            self.selected = self.selected.checked_sub(1).unwrap_or(self.nodes.len() - 1);
-            self.adjust_scroll();
-        }
-    }
-
-    fn adjust_scroll(&mut self) {
-        if self.last_height == 0 {
+        if self.nodes.is_empty() {
             return;
         }
-        if self.selected < self.scroll_offset {
-            self.scroll_offset = self.selected;
-        } else if self.selected >= self.scroll_offset + self.last_height {
-            self.scroll_offset = self.selected - self.last_height + 1;
-        }
+        let i = match self.list_state.selected() {
+            Some(i) => i.checked_sub(1).unwrap_or(self.nodes.len() - 1),
+            None => 0,
+        };
+        self.list_state.select(Some(i));
     }
 
     pub fn scroll_up(&mut self) {
-        if self.scroll_offset > 0 {
-            self.scroll_offset -= 1;
-        }
+        self.list_state.scroll_up_by(1);
     }
 
     pub fn scroll_down(&mut self) {
-        if self.last_height == 0 {
-            return;
-        }
-        let max_scroll = self.nodes.len().saturating_sub(self.last_height);
-        if self.scroll_offset < max_scroll {
-            self.scroll_offset += 1;
-        }
+        self.list_state.scroll_down_by(1);
     }
 
     pub fn click(&mut self, x: u16, y: u16, _area: Rect) -> Option<usize> {
@@ -133,10 +122,11 @@ impl SavedView {
         }
 
         let inner_y = y.saturating_sub(list_inner.y);
-        let idx = self.scroll_offset + inner_y as usize;
+        let offset = self.list_state.offset();
+        let idx = offset + inner_y as usize;
 
         if idx < self.nodes.len() {
-            self.selected = idx;
+            self.list_state.select(Some(idx));
             Some(idx)
         } else {
             None
@@ -147,15 +137,17 @@ impl SavedView {
         if self.nodes.is_empty() {
             return None;
         }
-        let removed = self.nodes.remove(self.selected);
-        if self.selected >= self.nodes.len() && !self.nodes.is_empty() {
-            self.selected = self.nodes.len() - 1;
+        let selected = self.selected();
+        let removed = self.nodes.remove(selected);
+        if selected >= self.nodes.len() && !self.nodes.is_empty() {
+            self.list_state.select(Some(self.nodes.len() - 1));
         }
         Some(removed)
     }
 
     pub fn toggle_identify_selected(&mut self) -> Option<&NodeInfo> {
-        if let Some(node) = self.nodes.get_mut(self.selected) {
+        let selected = self.selected();
+        if let Some(node) = self.nodes.get_mut(selected) {
             node.identify = !node.identify;
             Some(node)
         } else {
@@ -219,82 +211,32 @@ impl SavedView {
             return;
         }
 
-        for (i, node) in self
+        let items: Vec<ListItem> = self
             .nodes
             .iter()
-            .enumerate()
-            .skip(self.scroll_offset)
-            .take(inner.height as usize)
-        {
-            let y = inner.y + (i - self.scroll_offset) as u16;
-            let is_selected = i == self.selected;
-            let hash_short = format!("{}..{}", &node.hash_hex()[..6], &node.hash_hex()[26..]);
+            .map(|node| {
+                let hash_short = format!("{}..{}", &node.hash_hex()[..6], &node.hash_hex()[26..]);
+                ListItem::new(Line::from(vec![
+                    Span::styled(" \u{2022} ", Style::default().fg(Color::Green)),
+                    Span::styled(&node.name, Style::default().fg(Color::Gray)),
+                    Span::styled(
+                        format!("  {}", hash_short),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ]))
+            })
+            .collect();
 
-            let (bullet_style, name_style, hash_style, bg) = if is_selected {
-                (
-                    Style::default().fg(Color::Green).bg(Color::DarkGray),
-                    Style::default()
-                        .fg(Color::White)
-                        .bg(Color::DarkGray)
-                        .add_modifier(Modifier::BOLD),
-                    Style::default().fg(Color::Gray).bg(Color::DarkGray),
-                    Style::default().bg(Color::DarkGray),
-                )
-            } else {
-                (
-                    Style::default().fg(Color::Green),
-                    Style::default().fg(Color::Gray),
-                    Style::default().fg(Color::DarkGray),
-                    Style::default(),
-                )
-            };
+        let list = List::new(items)
+            .highlight_style(
+                Style::default()
+                    .bg(Color::DarkGray)
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .highlight_symbol("");
 
-            // Clear the line with background if selected
-            if is_selected {
-                for x in inner.x..inner.x + inner.width {
-                    buf.set_string(x, y, " ", bg);
-                }
-            }
-
-            buf.set_string(inner.x, y, " \u{2022} ", bullet_style);
-
-            let available = inner.width.saturating_sub(3) as usize;
-            let hash_display = format!("  {}", hash_short);
-            let hash_len = hash_display.width();
-            let name_width = node.name.width();
-
-            if available <= 5 {
-                continue;
-            }
-
-            let max_name_width = available.saturating_sub(hash_len);
-            let (name_display, name_display_width) = if name_width <= max_name_width {
-                (node.name.clone(), name_width)
-            } else if max_name_width >= 3 {
-                let mut truncated = String::new();
-                let mut width = 0;
-                for c in node.name.chars() {
-                    let cw = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
-                    if width + cw + 2 > max_name_width {
-                        break;
-                    }
-                    truncated.push(c);
-                    width += cw;
-                }
-                truncated.push_str("..");
-                (truncated, width + 2)
-            } else {
-                (String::new(), 0)
-            };
-
-            buf.set_string(inner.x + 3, y, &name_display, name_style);
-
-            let hash_x = inner.x + 3 + name_display_width as u16;
-            let remaining = available.saturating_sub(name_display_width);
-            if remaining >= hash_len {
-                buf.set_string(hash_x, y, &hash_display, hash_style);
-            }
-        }
+        ratatui::widgets::StatefulWidget::render(list, inner, buf, &mut self.list_state);
     }
 
     fn render_detail(&mut self, area: Rect, buf: &mut Buffer) {

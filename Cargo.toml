@@ -4,8 +4,10 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-rinse = { path = "../rinse", features = ["tokio", "config"] }
-micronaut = { path = "../micronaut", features = ["ratatui"] }
+rinse = { git = "https://github.com/cyypherus/rinse.git", branch = "main", features = ["tcp", "config"] }
+micronaut = { git = "https://github.com/cyypherus/micronaut.git", branch = "main", features = ["ratatui"] }
+# rinse = { path = "../rinse", features = ["tcp", "config"] }
+# micronaut = { path = "../micronaut", features = ["ratatui"] }
 
 tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"
@@ -18,13 +20,13 @@ toml = "0.8"
 thiserror = "1"
 hex = "0.4"
 log = "0.4"
-simplelog = "0.12"
+env_logger = "0.11"
+chrono = "0.4"
 rmp-serde = "1.3"
 serde_bytes = "0.11"
 sha2 = "0.10"
 rand = "0.8"
 cli-clipboard = "0.4"
-unicode-width = "0.2"
 
 [dev-dependencies]
 ed25519-dalek = { version = "2", features = ["rand_core"] }

@@ -278,10 +278,10 @@ impl MyNodeView {
         block.render(area, buf);
 
         let content = if let Some(ref stats) = self.stats {
-            let uptime = StatsSnapshot::format_uptime(stats.uptime_secs);
-            let rx_bytes = StatsSnapshot::format_bytes(stats.bytes_received);
-            let tx_bytes = StatsSnapshot::format_bytes(stats.bytes_sent);
-            let relay_bytes = StatsSnapshot::format_bytes(stats.bytes_relayed);
+            let uptime = super::format_uptime(stats.uptime_secs);
+            let rx_bytes = super::format_bytes(stats.bytes_received);
+            let tx_bytes = super::format_bytes(stats.bytes_sent);
+            let relay_bytes = super::format_bytes(stats.bytes_relayed);
 
             let chart_width = inner.width.saturating_sub(6) as usize;
             let sparkline = self.render_sparkline(chart_width);

@@ -1,11 +1,14 @@
-use rinse::config::{Config, ConfigError, InterfaceConfig};
-use rinse::{AsyncNode, AsyncTcpTransport, Interface, ServiceId};
+use rinse::config::{load_ratchets, Config, ConfigError, InterfaceConfig};
+use rinse::{Interface, Node, ServiceId, TcpTransport};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::Mutex;
 
 use crate::identity::{Identity, IdentityError};
+
+const RATCHET_INTERVAL: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 #[derive(Error, Debug)]
 pub enum AppError {
@@ -20,7 +23,7 @@ pub enum AppError {
 pub struct NomadApp {
     config: Config,
     identity: Identity,
-    node: Arc<Mutex<AsyncNode<AsyncTcpTransport>>>,
+    node: Arc<Mutex<Node<TcpTransport>>>,
     service_id: Option<ServiceId>,
     dest_hash: [u8; 16],
     interface_status: HashMap<String, bool>,
@@ -35,12 +38,17 @@ impl NomadApp {
         log::info!("Identity loaded");
 
         let relay_enabled = config.network.relay;
-        let mut node = AsyncNode::new(relay_enabled);
+        let mut node = Node::new(relay_enabled);
 
-        let service_id = node.add_service("nomadnetwork.node", &["/page/*"], identity.inner());
+        let service_id = node.add_service("nomadnetwork.node", &[], identity.inner());
         let dest_hash = node.service_address(service_id).unwrap();
 
         log::info!("Our address: {}", hex::encode(dest_hash));
+
+        let existing_ratchets = load_ratchets(&dest_hash).ok();
+        let ratchet_count = existing_ratchets.as_ref().map(|r| r.len()).unwrap_or(0);
+        node.enable_ratchets(service_id, RATCHET_INTERVAL, existing_ratchets);
+        log::info!("Ratchets enabled (loaded {} existing)", ratchet_count);
 
         let enabled_interfaces = config.enabled_interfaces();
         if enabled_interfaces.is_empty() {
@@ -58,7 +66,7 @@ impl NomadApp {
                 } => {
                     let addr = format!("{}:{}", target_host, target_port);
                     log::info!("Connecting to {} ({})", name, addr);
-                    match AsyncTcpTransport::connect(&addr).await {
+                    match TcpTransport::connect(&addr).await {
                         Ok(transport) => {
                             node.add_interface(Interface::new(transport));
                             interface_status.insert(name.to_string(), true);
@@ -102,7 +110,7 @@ impl NomadApp {
         self.dest_hash
     }
 
-    pub fn take_node(&mut self) -> Arc<Mutex<AsyncNode<AsyncTcpTransport>>> {
+    pub fn take_node(&mut self) -> Arc<Mutex<Node<TcpTransport>>> {
         self.node.clone()
     }
 

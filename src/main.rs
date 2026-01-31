@@ -7,14 +7,13 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::sync::Arc;
 
-use rinse::config::{Config, InterfaceConfig};
-use rinse::{AsyncTcpTransport, Interface, RequestError, ServiceEvent};
+use rinse::config::{save_ratchets, Config, InterfaceConfig};
+use rinse::{Interface, RequestError, TcpTransport};
 
 use tokio::sync::{mpsc, oneshot};
 
 use app::NomadApp;
 use network::{NetworkClient, NodeRegistry};
-use simplelog::{Config as LogConfig, LevelFilter, WriteLogger};
 use tui::{InterfaceInfo, InterfaceKind, NetworkEvent, TuiApp, TuiCommand};
 
 struct FetchReq {
@@ -68,7 +67,22 @@ fn build_interface_info(config: &Config, status: &HashMap<String, bool>) -> Vec<
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(".rinse")?;
     let log_file = File::create(".rinse/nomad.log")?;
-    WriteLogger::init(LevelFilter::Trace, LogConfig::default(), log_file)?;
+
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .format(|buf, record| {
+            use std::io::Write;
+            let now = chrono::Local::now();
+            writeln!(
+                buf,
+                "{} [{}] {}: {}",
+                now.format("%H:%M:%S"),
+                record.level(),
+                record.target(),
+                record.args()
+            )
+        })
+        .target(env_logger::Target::Pipe(Box::new(log_file)))
+        .init();
 
     log::info!("Starting Nomad...");
 
@@ -132,10 +146,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let node = Arc::new(node_clone);
     let node_for_network = node.clone();
-    let node_for_receive = node.clone();
 
     let network_task = tokio::spawn(async move {
         let node = node_for_network;
+
+        // Save ratchets after node is running (for startup announce case)
+        if let Some(ratchets) = node.export_ratchets(service_id).await {
+            if let Err(e) = save_ratchets(&dest_hash, &ratchets) {
+                log::warn!("Failed to save initial ratchets: {}", e);
+            }
+        }
+
         loop {
             tokio::select! {
                 _ = shutdown_rx.recv() => {
@@ -149,6 +170,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             log::info!("Announce command received");
                             node.announce(service_id);
                             log::info!("Announce completed");
+
+                            if let Some(ratchets) = node.export_ratchets(service_id).await {
+                                if let Err(e) = save_ratchets(&dest_hash, &ratchets) {
+                                    log::warn!("Failed to save ratchets: {}", e);
+                                }
+                            }
+
                             let _ = event_tx_clone.send(NetworkEvent::AnnounceSent).await;
                         }
                         TuiCommand::FetchPage { node: target_node, path, form_data } => {
@@ -296,7 +324,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     let _ = event_tx.send(NetworkEvent::Status(
                                         format!("Connecting to {}...", name_clone)
                                     )).await;
-                                    match AsyncTcpTransport::connect(&addr).await {
+                                    match TcpTransport::connect(&addr).await {
                                         Ok(transport) => {
                                             node.add_interface(Interface::new(transport));
                                             log::info!("Reconnected to {}", name_clone);
@@ -348,16 +376,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let identity_for_req = identity.inner().clone();
 
                             tokio::spawn(async move {
-                                if !node.request_path(req.dest).await {
+                                if node.request_path(req.dest).await.is_err() {
                                     log::error!("Path request failed");
                                     let _ = req.reply.send(Err("Path not found".to_string()));
                                     return;
                                 }
 
-                                let Some(link) = node.establish_link(service_id, req.dest).await else {
-                                    log::error!("Failed to establish link");
-                                    let _ = req.reply.send(Err("Failed to establish link".to_string()));
-                                    return;
+                                let link = match node.establish_link(service_id, req.dest).await {
+                                    Ok(link) => link,
+                                    Err(e) => {
+                                        log::error!("Failed to establish link: {:?}", e);
+                                        let _ = req.reply.send(Err("Failed to establish link".to_string()));
+                                        return;
+                                    }
                                 };
 
                                 if req.identify {
@@ -367,9 +398,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                                 log::info!("Calling node.request()");
                                 let result = match node.request(service_id, link, &path, &request_data).await {
-                                    Ok((response, _metadata)) => {
-                                        log::info!("Got response: {} bytes", response.len());
-                                        Ok(response)
+                                    Ok(response) => {
+                                        log::info!("Got response: {} bytes", response.data.len());
+                                        Ok(response.data)
                                     }
                                     Err(e) => {
                                         log::error!("Request failed: {:?}", e);
@@ -398,28 +429,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let network_client_for_receive = network_client.clone();
     let event_tx_receive = event_tx.clone();
-    let receive_task = tokio::spawn(async move {
+    let node_for_destinations = node.clone();
+    let destinations_task = tokio::spawn(async move {
+        let mut node = (*node_for_destinations).clone();
         loop {
-            match node_for_receive.recv(service_id).await {
-                Some(ServiceEvent::DestinationsChanged) => {
-                    let destinations = node_for_receive.known_destinations().await;
-                    network_client_for_receive
-                        .handle_destinations_changed(destinations)
-                        .await;
-                }
-                Some(ServiceEvent::ResourceProgress {
-                    received_bytes,
-                    total_bytes,
-                    ..
-                }) => {
-                    let _ = event_tx_receive
-                        .send(NetworkEvent::ResourceProgress {
-                            received_bytes,
-                            total_bytes,
-                        })
-                        .await;
-                }
-                _ => {}
+            node.destinations_changed().await;
+            let destinations = node.known_destinations().await;
+            network_client_for_receive
+                .handle_destinations_changed(destinations)
+                .await;
+        }
+    });
+
+    let node_for_progress = node.clone();
+    let progress_task = tokio::spawn(async move {
+        loop {
+            if let Some(progress) = node_for_progress.recv_progress(service_id).await {
+                let _ = event_tx_receive
+                    .send(NetworkEvent::ResourceProgress {
+                        received_bytes: progress.received_bytes,
+                        total_bytes: progress.total_bytes,
+                    })
+                    .await;
             }
         }
     });
@@ -471,7 +502,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = network_task.await;
     announce_task.abort();
     stats_task.abort();
-    receive_task.abort();
+    destinations_task.abort();
+    progress_task.abort();
     node_task.abort();
 
     tui_result?;

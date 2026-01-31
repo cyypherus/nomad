@@ -315,8 +315,8 @@ impl TuiApp {
                     };
                     self.status_bar.set_status(format!(
                         "Downloading... {} / {} ({}%)",
-                        rinse::StatsSnapshot::format_bytes(received_bytes as u64),
-                        rinse::StatsSnapshot::format_bytes(total_bytes as u64),
+                        super::format_bytes(received_bytes as u64),
+                        super::format_bytes(total_bytes as u64),
                         pct
                     ));
                 }

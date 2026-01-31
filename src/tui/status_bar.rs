@@ -51,7 +51,7 @@ impl StatusBar {
             .relay_stats
             .as_ref()
             .filter(|s| s.packets_relayed > 0 || s.announces_relayed > 0)
-            .map(|s| StatsSnapshot::format_bytes(s.bytes_relayed).len() + 4)
+            .map(|s| super::format_bytes(s.bytes_relayed).len() + 4)
             .unwrap_or(0);
 
         status_width.max(relay_width) as u16
@@ -89,7 +89,7 @@ impl Widget for &StatusBar {
                 let relay_line = Line::from(vec![
                     Span::styled("\u{2191}\u{2193}", Style::default().fg(Color::Magenta)),
                     Span::styled(
-                        format!(" {} ", StatsSnapshot::format_bytes(stats.bytes_relayed)),
+                        format!(" {} ", super::format_bytes(stats.bytes_relayed)),
                         Style::default().fg(Color::White),
                     ),
                 ]);
