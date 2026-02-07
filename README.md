@@ -21,7 +21,9 @@
 
 - If the node responds you'll see an interactive micron webpage rendered. You're officially surfing nomadnet using reticulum mesh networking.
 
-
 > [!NOTE]
 > `nomad`, [micronaut](https://github.com/cyypherus/micronaut), [rinse](https://github.com/cyypherus/rinse) and `reticulum` in general are all relatively young software. You'll probably run into some bugs here and there.
- 
+
+# Contributing
+
+By submitting a contribution, you agree that it will be licensed under the project’s license.
